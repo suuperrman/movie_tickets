@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.javaup</groupId>
+        <artifactId>movie-plus</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>movie-redisson-framework</artifactId>
+    <name>movie-redisson-framework</name>
+    <description>redisson封装</description>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>movie-redisson-service-framework</module>
+        <module>movie-service-delay-queue-framework</module>
+    </modules>
+
+</project>

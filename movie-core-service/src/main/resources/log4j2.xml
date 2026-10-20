@@ -8,63 +8,72 @@
 <Configuration status="WARN" monitorInterval="600">
 
     <Properties>
-        <!-- 配置日志文件输出目录 -->
-        <Property name="LOG_HOME">.</Property>
+        <!--
+            日志输出目录：固定写入项目根 logs/ 下
+            使用 Spring Boot 注入的 ${spring:application.home} 或 user.dir，
+            确保无论从哪个目录启动都能找到日志
+        -->
+        <Property name="LOG_HOME">${sys:user.dir}/logs</Property>
         <Property name="PROJECT_NAME">core-service</Property>
         <Property name="ENV">local</Property>
         <Property name="FILE_NAME">log</Property>
-        <Property name="PATTERN">[core-service] %d{yyyy-MM-dd HH:mm:ss} %5p %c{1}:%L - %m%n</Property>
+        <!-- 日志格式：同时输出 %file（文件名）和 %L（行号）便于定位 -->
+        <Property name="PATTERN">[%d{HH:mm:ss.SSS}] [%t] %-5level %logger{36} - %msg%n</Property>
         <Property name="ENCODING">UTF-8</Property>
-        <Property name="CUSTOM_MESSAGE_KEY">org.javaup</Property>
     </Properties>
 
     <Appenders>
-        <!--输出控制台的配置-->
+        <!-- ============ 控制台输出 ============ -->
         <Console name="Console" target="SYSTEM_OUT">
-            <!-- 控制台只输出level及以上级别的信息(onMatch),其他的直接拒绝(onMismatch) -->
-            <!--  <ThresholdFilter level="trace" onMatch="ACCEPT" onMismatch="DENY"/> -->
-            <!-- 输出日志的格式 -->
             <PatternLayout pattern="${PATTERN}"/>
-            <ThresholdFilter level="INFO"/>
         </Console>
 
-        <!-- 输出到日志文件 -->
-        <RollingFile name="RollingFile" fileName="${LOG_HOME}/logs/${PROJECT_NAME}/${FILE_NAME}.log"
-                     filePattern="${LOG_HOME}/logs/${PROJECT_NAME}/$${date:yyyy-MM}/${FILE_NAME}-%d{yyyy-MM-dd}-%i.log.gz">
-            <ThresholdFilter level="INFO"/>
+        <!-- ============ INFO 及以上级别 → 文件 ============ -->
+        <RollingFile name="RollingFile"
+                     fileName="${LOG_HOME}/${PROJECT_NAME}/${FILE_NAME}.log"
+                     filePattern="${LOG_HOME}/${PROJECT_NAME}/$${date:yyyy-MM}/${FILE_NAME}-%d{yyyy-MM-dd}-%i.log.gz">
             <PatternLayout charset="${ENCODING}" pattern="${PATTERN}"/>
             <Policies>
-                <!--  interval，integer型，指定两次封存动作之间的时间间隔。单位:以日志的命名精度来确定单位，比如yyyy-MM-dd-HH 单位为小时，yyyy-MM-dd-HH-mm 单位为分钟
-                    modulate，boolean型，说明是否对封存时间进行调制。若modulate=true，则封存时间将以0点为边界进行偏移计算 -->
+                <!-- 按天滚动 -->
                 <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+                <!-- 单文件超过 100MB 也滚动 -->
                 <SizeBasedTriggeringPolicy size="100 MB"/>
             </Policies>
-            <!-- 最多保留文件数 -->
             <DefaultRolloverStrategy max="30"/>
         </RollingFile>
 
-        <!-- 输出错误信息到日志文件 -->
-        <RollingFile name="RollingFileError" fileName="${LOG_HOME}/logs/${PROJECT_NAME}/${FILE_NAME}-error.log"
-                     filePattern="${LOG_HOME}/logs/${PROJECT_NAME}/$${date:yyyy-MM}/${FILE_NAME}-error-%d{yyyy-MM-dd}-%i.log.gz">
+        <!-- ============ ERROR 单独文件 ============ -->
+        <RollingFile name="RollingFileError"
+                     fileName="${LOG_HOME}/${PROJECT_NAME}/${FILE_NAME}-error.log"
+                     filePattern="${LOG_HOME}/${PROJECT_NAME}/$${date:yyyy-MM}/${FILE_NAME}-error-%d{yyyy-MM-dd}-%i.log.gz">
             <ThresholdFilter level="ERROR"/>
             <PatternLayout charset="${ENCODING}" pattern="${PATTERN}"/>
             <Policies>
-                <!--  interval，integer型，指定两次封存动作之间的时间间隔。单位:以日志的命名精度来确定单位，比如yyyy-MM-dd-HH 单位为小时，yyyy-MM-dd-HH-mm 单位为分钟
-                    modulate，boolean型，说明是否对封存时间进行调制。若modulate=true，则封存时间将以0点为边界进行偏移计算 -->
                 <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
                 <SizeBasedTriggeringPolicy size="100 MB"/>
             </Policies>
-            <!-- 最多保留文件数 -->
             <DefaultRolloverStrategy max="30"/>
         </RollingFile>
     </Appenders>
 
     <Loggers>
-        <!--过滤掉spring和mybatis的一些无用的DEBUG信息-->
-        <logger name="org.springframework" level="INFO" additivity="true"/>
-        <logger name="org.mybatis" level="INFO" additivity="true"/>
-        <logger name="org.springframework.jdbc.core" additivity="false" level="INFO" />
-        <!-- 配置日志的根节点 -->
+        <!-- 业务代码 DEBUG 级（方便 SQL 调优和业务追踪） -->
+        <logger name="org.javaup" level="DEBUG" additivity="false">
+            <appender-ref ref="Console"/>
+            <appender-ref ref="RollingFile"/>
+            <appender-ref ref="RollingFileError"/>
+        </logger>
+
+        <!-- MyBatis SQL 输出 -->
+        <logger name="org.mybatis" level="INFO"/>
+        <logger name="com.baomidou.mybatisplus" level="INFO"/>
+
+        <!-- 降噪 -->
+        <logger name="org.springframework" level="INFO"/>
+        <logger name="com.zaxxer.hikari" level="WARN"/>
+        <logger name="org.apache.tomcat" level="WARN"/>
+
+        <!-- 根节点 -->
         <root level="INFO">
             <appender-ref ref="Console"/>
             <appender-ref ref="RollingFile"/>

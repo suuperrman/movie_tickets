@@ -42,6 +42,7 @@ public class LoginInterceptor implements HandlerInterceptor {
             return false;
         }
 
+        log.info("获取Authorization：{}",authHeader);
         String token = authHeader.substring(7);
 
         // 2. 解析并验证 JWT

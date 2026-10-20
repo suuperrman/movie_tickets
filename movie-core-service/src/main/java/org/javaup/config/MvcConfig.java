@@ -45,6 +45,8 @@ public class MvcConfig implements WebMvcConfigurer {
                         "/auth/captcha",
                         "/auth/forgot-password",
                         "/auth/reset-password",
+                        // ========= 电影模块公开接口（列表/详情/场次/座位图） =========
+                        "/movie/**",
                         // ========= Actuator =========
                         "/actuator/**"
                 ).order(1);

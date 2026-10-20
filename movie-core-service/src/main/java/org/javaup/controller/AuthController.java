@@ -48,7 +48,7 @@ public class AuthController {
     // ==================== GET /api/auth/captcha 图形验证码（公开） ====================
 
     @GetMapping("/captcha")
-    public Result<CaptchaResponseDTO> captcha(@RequestParam String phone) {
+    public Result<CaptchaResponseDTO> captcha(@RequestParam("phone") String phone) {
         return Result.ok(authService.getCaptcha(phone));
     }
 
@@ -92,7 +92,7 @@ public class AuthController {
      * DELETE /api/auth/sessions/{sessionId}  强制下线某个会话
      */
     @DeleteMapping("/sessions/{sessionId}")
-    public Result<Void> revokeSession(@PathVariable String sessionId) {
+    public Result<Void> revokeSession(@PathVariable("sessionId") String sessionId) {
         Long userId = UserHolder.getUser().getId();
         authService.revokeSession(userId, sessionId);
         return Result.ok();

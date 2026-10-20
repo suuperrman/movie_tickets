@@ -358,6 +358,8 @@ public class AuthServiceImpl implements AuthService {
         String accessToken = jwtUtils.generateAccessToken(userId, phone);
         String refreshToken = jwtUtils.generateRefreshToken(userId, refreshTokenId, familyId);
 
+        log.info("生成token1:{}",accessToken);
+        log.info("生成token2:{}",refreshToken);
         // 存储 Refresh Token
         stringRedisTemplate.opsForValue().set(
                 REFRESH_TOKEN_KEY + refreshTokenId, userId + ":" + familyId,

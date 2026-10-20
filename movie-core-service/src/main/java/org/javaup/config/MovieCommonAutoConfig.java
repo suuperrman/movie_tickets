@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
 import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * @program: movie-ticket
@@ -12,6 +13,7 @@ import org.springframework.context.annotation.Bean;
  * @author: xiong
  **/
 
+@Configuration
 public class MovieCommonAutoConfig {
     
     @Bean

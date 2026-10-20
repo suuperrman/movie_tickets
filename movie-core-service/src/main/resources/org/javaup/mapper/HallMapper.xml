@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.javaup.mapper.HallMapper">
+
+    <resultMap id="BaseResultMap" type="org.javaup.entity.Hall">
+            <id property="id" column="id" />
+            <result property="cinemaId" column="cinema_id" />
+            <result property="name" column="name" />
+            <result property="type" column="type" />
+            <result property="rowCount" column="row_count" />
+            <result property="colCount" column="col_count" />
+            <result property="layout" column="layout" />
+            <result property="createdAt" column="created_at" />
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id,cinema_id,name,type,row_count,col_count,
+        layout,created_at
+    </sql>
+</mapper>

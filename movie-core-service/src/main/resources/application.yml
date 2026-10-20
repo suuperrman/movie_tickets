@@ -28,6 +28,15 @@ spring:
       matching-strategy: ant_path_matcher
     servlet:
       load-on-startup: 1    
+  servlet:
+    multipart:
+      # 全局文件上传限制（Spring Boot 在 HTTP 层先拦一遍，超限直接返回 413）
+      # 必须 <= oss.max-size-mb，否则会出现 "Service 允许 10MB 但 HTTP 拦在 1MB" 的矛盾
+      enabled: true
+      max-file-size: 10MB
+      max-request-size: 15MB
+      # 临时文件目录（默认系统临时目录即可，注释出来是提醒不要放 C 盘）
+      # location: D:/tmp/multipart
   jackson:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
     time-zone: GMT+8
@@ -63,12 +72,8 @@ mybatis-plus:
   configuration:
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
     local-cache-scope: statement
-logging:
-  level:
-    org.javaup: info
-    AUDIT: INFO
-  pattern:
-    dateformat: mm:ss.SSS
+# logging 完全由 logback-spring.xml 控制，这里留空
+logging: {}
 #bloom-filter:
 #  filters:
 #    shop:
@@ -84,7 +89,7 @@ auth:
   # JWT 签名密钥（生产环境必须通过环境变量 AUTH_JWT_SECRET 注入！）
   jwt-secret: ${AUTH_JWT_SECRET:movie-ticket-master-jwt-secret-key-256-bit-long-string-please-change}
   # Access Token 有效期（分钟）
-  access-token-expire-minutes: 15
+  access-token-expire-minutes: 30
   # Refresh Token 有效期（天）
   refresh-token-expire-days: 7
   # Refresh Token Cookie 名称
@@ -97,6 +102,28 @@ auth:
   cookie-secure: false
   # Cookie SameSite 策略
   cookie-same-site: Lax
+
+# ========== 阿里云 OSS 对象存储 ==========
+# ⚠️ 安全警告：AccessKey 是敏感凭证！
+#   - 以下为开发环境默认值，**生产环境绝对不能明文写死**
+#   - 生产部署必须通过环境变量覆盖：
+#     Windows(PowerShell):  $env:OSS_ACCESS_KEY_ID="xxx"  $env:OSS_ACCESS_KEY_SECRET="xxx"
+#     Linux / Docker:       -e OSS_ACCESS_KEY_ID=xxx -e OSS_ACCESS_KEY_SECRET=xxx
+#   - 也可在启动命令中加：--oss.access-key-id=xxx --oss.access-key-secret=xxx
+aliyun:
+  oss:
+    endpoint: https://oss-cn-beijing.aliyuncs.com
+    access-key-id: ${OSS_ACCESS_KEY_ID:REDACTED}
+    access-key-secret: ${OSS_ACCESS_KEY_SECRET:REDACTED}
+    bucket-name: xiong-movie-ticket
+    region: cn-beijing
+    # 文件访问域名（CDN 加速或 bucket 外网域名，不填则用 endpoint）
+    domain: ""
+    # 上传文件的公共路径前缀（按业务分目录）
+    # 最终对象 key = prefix + yyyy/MM/dd + 雪花ID + 原扩展名
+    prefix: ""
+    # 最大上传大小（MB）
+    max-size-mb: 10
 
 management:
   endpoints:

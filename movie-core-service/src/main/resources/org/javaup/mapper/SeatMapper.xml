@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.javaup.mapper.SeatMapper">
+
+    <resultMap id="BaseResultMap" type="org.javaup.entity.Seat">
+            <id property="id" column="id" />
+            <result property="hallId" column="hall_id" />
+            <result property="rowNo" column="row_no" />
+            <result property="colNo" column="col_no" />
+            <result property="seatCode" column="seat_code" />
+            <result property="isActive" column="is_active" />
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id,hall_id,row_no,col_no,seat_code,is_active
+    </sql>
+</mapper>

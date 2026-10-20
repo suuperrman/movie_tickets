@@ -1,16 +1,27 @@
 package org.javaup.config;
 
 import org.javaup.execute.RedisRateLimitHandler;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.lua.SlidingRateLimitOperate;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.lua.TokenBucketRateLimitOperate;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.ratelimit.extension.NoOpRateLimitEventListener;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.ratelimit.extension.NoOpRateLimitPenaltyPolicy;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.ratelimit.extension.RateLimitEventListener;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.ratelimit.extension.RateLimitPenaltyPolicy;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.ratelimit.extension.ThresholdPenaltyPolicy;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.redis.RedisCache;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * @program: movie-ticket 
@@ -18,6 +29,7 @@ import org.springframework.context.annotation.Bean;
  * @author: xiong
  **/
 @EnableConfigurationProperties(SeckillRateLimitConfigProperties.class)
+@Configuration
 public class RateLimitAutoConfiguration {
     
     @Bean

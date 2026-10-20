@@ -1,24 +1,42 @@
 package org.javaup.config;
 
 import org.javaup.handle.RedissonDataHandle;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.locallock.LocalLockCache;
+import org.springframework.context.annotation.Configuration;
 import org.javaup.lockinfo.factory.LockInfoHandleFactory;
+import org.springframework.context.annotation.Configuration;
 import org.redisson.Redisson;
+import org.springframework.context.annotation.Configuration;
 import org.redisson.api.RedissonClient;
+import org.springframework.context.annotation.Configuration;
 import org.redisson.config.Config;
+import org.springframework.context.annotation.Configuration;
 import org.redisson.spring.starter.RedissonAutoConfiguration;
+import org.springframework.context.annotation.Configuration;
 import org.redisson.spring.starter.RedissonAutoConfigurationV2;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.AutoConfigureBefore;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.util.ReflectionUtils;
+import org.springframework.context.annotation.Configuration;
 
 import java.lang.reflect.Method;
+import org.springframework.context.annotation.Configuration;
 import java.util.Objects;
+import org.springframework.context.annotation.Configuration;
 import java.util.concurrent.LinkedBlockingQueue;
+import org.springframework.context.annotation.Configuration;
 import java.util.concurrent.ThreadPoolExecutor;
+import org.springframework.context.annotation.Configuration;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * @program: movie-ticket 
@@ -27,6 +45,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  **/
 @AutoConfigureBefore(value = {RedissonAutoConfigurationV2.class, RedissonAutoConfiguration.class})
 @EnableConfigurationProperties(RedissonBaseProperties.class)
+@Configuration
 public class RedissonCommonAutoConfiguration {
     
     private final AtomicInteger executeTaskThreadCount = new AtomicInteger(1);

@@ -102,6 +102,14 @@
                 <configuration>
                     <release>${java.version}</release>
                     <encoding>${project.sourceEncoding}</encoding>
+                    <!--
+                        必须开启：Spring Boot 6 / Spring 6.x 强制要求参数名反射可用。
+                        否则 Controller 里 @PathVariable Long id 不写显式 name 时会抛：
+                          IllegalArgumentException: Name for argument of type [java.lang.Long] not specified
+                        加了这个后，所有 @PathVariable / @RequestParam 都能自动按参数名匹配。
+                        对所有子模块生效（Maven 继承）。
+                    -->
+                    <parameters>true</parameters>
                 </configuration>
             </plugin>
             <plugin>

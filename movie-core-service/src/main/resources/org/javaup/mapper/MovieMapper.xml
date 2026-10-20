@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.javaup.mapper.MovieMapper">
+
+    <resultMap id="BaseResultMap" type="org.javaup.entity.Movie">
+            <id property="id" column="id" />
+            <result property="name" column="name" />
+            <result property="director" column="director" />
+            <result property="duration" column="duration" />
+            <result property="releaseDate" column="release_date" />
+            <result property="posterUrl" column="poster_url" />
+            <result property="description" column="description" />
+            <result property="status" column="status" />
+            <result property="createdAt" column="created_at" />
+            <result property="updatedAt" column="updated_at" />
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id,name,director,duration,release_date,poster_url,
+        description,status,created_at,updated_at
+    </sql>
+</mapper>

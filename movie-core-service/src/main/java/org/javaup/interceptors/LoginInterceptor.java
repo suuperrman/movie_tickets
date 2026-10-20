@@ -1,4 +1,4 @@
-package org.javaup.utils;
+package org.javaup.interceptors;
 
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.http.HttpServletRequest;
@@ -6,6 +6,8 @@ import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.javaup.dto.UserDTO;
+import org.javaup.utils.JwtUtils;
+import org.javaup.utils.UserHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 

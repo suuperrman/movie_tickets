@@ -1,7 +1,7 @@
 package org.javaup.config;
 
 import jakarta.annotation.Resource;
-import org.javaup.utils.LoginInterceptor;
+import org.javaup.interceptors.LoginInterceptor;
 import org.javaup.utils.RefreshTokenInterceptor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -38,21 +38,13 @@ public class MvcConfig implements WebMvcConfigurer {
         registry.addInterceptor(loginInterceptor)
                 .excludePathPatterns(
                         // ========= 登录模块公开接口 =========
-                        "/api/auth/register",
-                        "/api/auth/login",
-                        "/api/auth/refresh",
-                        "/api/auth/logout",
-                        "/api/auth/captcha",
-                        "/api/auth/forgot-password",
-                        "/api/auth/reset-password",
-                        // ========= 老版接口兼容 =========
-                        "/shop/**",
-                        "/voucher/**",
-                        "/shop-type/**",
-                        "/upload/**",
-                        "/blog/hot",
-                        "/user/code",
-                        "/user/login",
+                        "/auth/register",
+                        "/auth/login",
+                        "/auth/refresh",
+                        "/auth/logout",
+                        "/auth/captcha",
+                        "/auth/forgot-password",
+                        "/auth/reset-password",
                         // ========= Actuator =========
                         "/actuator/**"
                 ).order(1);

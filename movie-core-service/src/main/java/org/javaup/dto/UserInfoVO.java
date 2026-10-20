@@ -33,9 +33,4 @@ public class UserInfoVO {
      * 头像
      */
     private String avatar;
-
-    /**
-     * 邮箱
-     */
-    private String email;
 }

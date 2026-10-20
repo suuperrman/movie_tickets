@@ -4,7 +4,7 @@ import org.javaup.dto.UserDTO;
 
 /**
  * @program: movie-ticket
- * @description: 用户持有器-黑马点评普通版本和plus版本使用
+ * @description: 用户持有器-movie-ticket版本使用
  * @author: xiong
  **/
 public class UserHolder {

@@ -131,12 +131,24 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
-        <!-- 登录模块新增依赖 -->
-        <!-- JWT 登录令牌 -->
+        <!-- JJWT 0.12.x（Java 17 兼容，API 已大改） -->
+        <!-- 注意：movie-common 传递进来老 jjwt:0.9.1，已通过下面 movie-sharding 的 exclusion 排除 -->
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
-            <artifactId>jjwt</artifactId>
-            <version>0.9.1</version>
+            <artifactId>jjwt-api</artifactId>
+            <version>0.12.6</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <version>0.12.6</version>
+            <scope>runtime</scope>
         </dependency>
         <!-- BCrypt 密码加密 -->
         <dependency>

@@ -7,8 +7,16 @@ spring:
     allow-bean-definition-overriding: true
     allow-circular-references: true  
   datasource:
-    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
-    url: jdbc:shardingsphere:classpath:shardingsphere.yaml
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://192.168.150.101:3306/movie_ticket?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowMultiQueries=true&autoReconnect=true
+    username: root
+    password: 123456
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 30
+      connection-timeout: 20000
+      idle-timeout: 300000
+      max-lifetime: 1800000
   data:
     redis:
       database: 0

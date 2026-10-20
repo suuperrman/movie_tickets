@@ -4,28 +4,37 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.MalformedJwtException;
-import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.UnsupportedJwtException;
+import io.jsonwebtoken.security.Keys;
+import io.jsonwebtoken.security.SignatureException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.javaup.config.AuthProperties;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
- * JWT 工具类（jjwt 0.9.1）
- * - Access Token：15 分钟有效期
- * - Refresh Token：7 天有效期（存储在 Redis 中验证）
+ * JWT 工具类（JJWT 0.12.6）
  *
- * jjwt 0.9.1 API：
- * - builder: setClaims / setSubject / setIssuedAt / setExpiration / signWith(algo, keyBytes)
- * - parser: parser().setSigningKey(key).parseClaimsJws(token).getBody()
+ * JJWT 0.12.x API 变更要点：
+ * ────────────────────────────────────────────────────────────────────
+ * 1. 依赖拆分为三件套：jjwt-api / jjwt-impl / jjwt-jackson
+ * 2. 密钥构造：Keys.hmacShaKeyFor(byte[]) 返回 SecretKey（弃用 SignatureAlgorithm.getJcaName）
+ * 3. builder API 变化：
+ *    - 旧：builder.setClaims(map) + signWith(SignatureAlgorithm.HS256, keyBytes)
+ *    - 新：builder.claim(name, val) + signWith(key, Jwts.SIG.HS256)
+ *    - subject() / issuedAt() / expiration() / compact() 保留
+ * 4. parser API 变化：
+ *    - 旧：parser().setSigningKey(key).parseClaimsJws(token).getBody()
+ *    - 新：parser().verifyWith(key).build().parseSignedClaims(token).getPayload()
+ * 5. 过期异常仍为 ExpiredJwtException，在 parseSignedClaims 抛出
+ * ────────────────────────────────────────────────────────────────────
+ *
+ * Access Token：15 分钟，type="access"，用于业务接口鉴权
+ * Refresh Token：7 天，type="refresh"，仅用于刷新，存 Redis 做重放检测
  */
 @Slf4j
 @Component
@@ -35,11 +44,12 @@ public class JwtUtils {
     private final AuthProperties authProperties;
 
     /**
-     * 获取签名密钥（HMAC-SHA256）
+     * 获取 HMAC-SHA256 签名密钥
+     * 使用 Keys.hmacShaKeyFor()（0.12.x 推荐方式）
      */
     private SecretKey getSigningKey() {
         byte[] keyBytes = authProperties.getJwtSecret().getBytes(StandardCharsets.UTF_8);
-        return new SecretKeySpec(keyBytes, SignatureAlgorithm.HS256.getJcaName());
+        return Keys.hmacShaKeyFor(keyBytes);
     }
 
     /**
@@ -50,80 +60,74 @@ public class JwtUtils {
         Date now = new Date();
         Date expireAt = new Date(now.getTime() + expireMillis);
 
-        Map<String, Object> claims = new HashMap<>();
-        claims.put("uid", userId);
-        claims.put("phone", phone);
-        claims.put("type", "access");
-
         return Jwts.builder()
-                .setClaims(claims)
-                .setSubject(String.valueOf(userId))
-                .setIssuedAt(now)
-                .setExpiration(expireAt)
-                .signWith(SignatureAlgorithm.HS256, getSigningKey().getEncoded())
+                .subject(String.valueOf(userId))
+                .issuedAt(now)
+                .expiration(expireAt)
+                .claim("uid", userId)
+                .claim("phone", phone)
+                .claim("type", "access")
+                .signWith(getSigningKey(), Jwts.SIG.HS256)
                 .compact();
     }
 
     /**
-     * 生成 Refresh Token（包含 tokenId，用于 Redis 存储和重放检测）
+     * 生成 Refresh Token
+     *
+     * @param userId   用户 ID
+     * @param tokenId  Refresh Token 唯一 ID（UUID），Redis 存储键
+     * @param familyId Token Family ID（同一轮换链的所有 Refresh Token 共享）
      */
     public String generateRefreshToken(Long userId, String tokenId, String familyId) {
-        long expireMillis = authProperties.getRefreshTokenExpireDays() * 24 * 60 * 60 * 1000L;
+        long expireMillis = authProperties.getRefreshTokenExpireDays() * 24L * 60 * 60 * 1000;
         Date now = new Date();
         Date expireAt = new Date(now.getTime() + expireMillis);
 
-        Map<String, Object> claims = new HashMap<>();
-        claims.put("uid", userId);
-        claims.put("tid", tokenId);
-        claims.put("fid", familyId);
-        claims.put("type", "refresh");
-
         return Jwts.builder()
-                .setClaims(claims)
-                .setSubject(String.valueOf(userId))
-                .setIssuedAt(now)
-                .setExpiration(expireAt)
-                .signWith(SignatureAlgorithm.HS256, getSigningKey().getEncoded())
+                .subject(String.valueOf(userId))
+                .issuedAt(now)
+                .expiration(expireAt)
+                .claim("uid", userId)
+                .claim("tid", tokenId)
+                .claim("fid", familyId)
+                .claim("type", "refresh")
+                .signWith(getSigningKey(), Jwts.SIG.HS256)
                 .compact();
     }
 
     /**
-     * 解析并验证 Token
+     * 解析并验证 JWT
      *
-     * @return Claims，验证失败返回 null
+     * @param token JWT 字符串
+     * @return Claims；过期/无效返回 null
      */
     public Claims parseToken(String token) {
         try {
             return Jwts.parser()
-                    .setSigningKey(getSigningKey())
-                    .parseClaimsJws(token)
-                    .getBody();
+                    .verifyWith(getSigningKey())
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload();
         } catch (ExpiredJwtException e) {
-            log.debug("JWT Token 已过期");
+            log.debug("JWT 已过期");
             return null;
-        } catch (UnsupportedJwtException | MalformedJwtException | IllegalArgumentException e) {
-            log.warn("JWT Token 无效: {}", e.getMessage());
+        } catch (UnsupportedJwtException | MalformedJwtException
+                | SignatureException | IllegalArgumentException e) {
+            log.warn("JWT 无效: {}", e.getMessage());
             return null;
         }
     }
 
-    /**
-     * 从 Claims 中获取用户 ID
-     */
+    // ==================== Claims 读取工具 ====================
+
     public Long getUserId(Claims claims) {
         if (claims == null) {
             return null;
         }
         Object uid = claims.get("uid");
-        if (uid == null) {
-            return null;
-        }
-        return Long.valueOf(uid.toString());
+        return uid == null ? null : Long.valueOf(uid.toString());
     }
 
-    /**
-     * 从 Claims 中获取手机号
-     */
     public String getPhone(Claims claims) {
         if (claims == null) {
             return null;
@@ -132,9 +136,6 @@ public class JwtUtils {
         return phone == null ? null : phone.toString();
     }
 
-    /**
-     * 从 Claims 中获取 Token ID（Refresh Token 专用）
-     */
     public String getTokenId(Claims claims) {
         if (claims == null) {
             return null;
@@ -143,9 +144,6 @@ public class JwtUtils {
         return tid == null ? null : tid.toString();
     }
 
-    /**
-     * 从 Claims 中获取 Token Family ID
-     */
     public String getFamilyId(Claims claims) {
         if (claims == null) {
             return null;
@@ -155,21 +153,14 @@ public class JwtUtils {
     }
 
     public boolean isAccessToken(Claims claims) {
-        if (claims == null) {
-            return false;
-        }
-        Object type = claims.get("type");
-        return "access".equals(type);
+        return claims != null && "access".equals(claims.get("type"));
     }
 
     public boolean isRefreshToken(Claims claims) {
-        if (claims == null) {
-            return false;
-        }
-        Object type = claims.get("type");
-        return "refresh".equals(type);
+        return claims != null && "refresh".equals(claims.get("type"));
     }
 
+    /** Access Token 过期秒数 */
     public long getAccessTokenExpireSeconds() {
         return authProperties.getAccessTokenExpireMinutes() * 60L;
     }

@@ -45,4 +45,7 @@ public interface AuthService {
 
     /** 强制下线某个会话 */
     void revokeSession(Long userId, String sessionId);
+
+    /** 修改用户资料（昵称、头像） */
+    UserInfoVO updateProfile(Long userId, UpdateProfileDTO dto);
 }

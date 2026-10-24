@@ -108,6 +108,15 @@ public class AuthController {
         return Result.ok();
     }
 
+    /**
+     * PUT /api/auth/profile  修改用户资料（昵称、头像）
+     */
+    @PutMapping("/profile")
+    public Result<UserInfoVO> updateProfile(@Valid @RequestBody UpdateProfileDTO dto) {
+        Long userId = UserHolder.getUser().getId();
+        return Result.ok(authService.updateProfile(userId, dto));
+    }
+
     // ==================== 以下接口需要单独白名单（LoginInterceptor excludePathPatterns） ====================
 
     /**

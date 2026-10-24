@@ -12,6 +12,9 @@ import org.javaup.entity.*;
 import org.javaup.enums.BaseCode;
 import org.javaup.exception.MovieFrameException;
 import org.javaup.mapper.*;
+import org.javaup.core.RedisKeyManage;
+import org.javaup.redis.RedisCache;
+import org.javaup.redis.RedisKeyBuild;
 import org.javaup.service.MovieService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -43,6 +46,7 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     private final ScheduleSeatMapper scheduleSeatMapper;
     private final CinemaMapper cinemaMapper;
     private final HallMapper hallMapper;
+    private final RedisCache redisCache;
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final DateTimeFormatter DATE_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
@@ -360,7 +364,35 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     // ========== 用户端：13. 选座页面座位图 ==========
 
     @Override
+    @Transactional(readOnly = true)
     public SeatMapVO seatMap(Long scheduleId) {
+        // ★ Redis 缓存：先查 Redis，miss 时查 DB 并写入，TTL 30s
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId);
+        try {
+            SeatMapVO cached = redisCache.get(key, SeatMapVO.class);
+            if (cached != null) {
+                log.debug("[缓存命中] seatmap scheduleId={}", scheduleId);
+                return cached;
+            }
+        } catch (Exception e) {
+            log.warn("[缓存读取失败] seatmap scheduleId={}: {}", scheduleId, e.getMessage());
+        }
+
+        // 缓存 miss，执行原始查询 + 编码
+        SeatMapVO vo = doSeatMapQuery(scheduleId);
+
+        try {
+            redisCache.set(key, vo, 100, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("[缓存写入失败] seatmap scheduleId={}: {}", scheduleId, e.getMessage());
+        }
+        return vo;
+    }
+
+    /**
+     * 真实 DB 查询 + Bitmap 编码（被 seatMap 和其他需要绕开缓存的调用复用）
+     */
+    private SeatMapVO doSeatMapQuery(Long scheduleId) {
         Schedule schedule = scheduleMapper.selectById(scheduleId);
         if (schedule == null || schedule.getStatus() != 1) {
             throw new MovieFrameException("场次不存在或已停售");

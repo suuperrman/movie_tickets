@@ -11,4 +11,6 @@ public class UserDTO {
     private Long id;
     private String nickName;
     private String icon;
+    /** 角色：0普通用户 1管理员 */
+    private Integer role;
 }

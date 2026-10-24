@@ -65,6 +65,7 @@ public class AuthServiceImpl implements AuthService {
         user.setPassword(passwordEncoder.encode(dto.getPassword()));
         user.setNickname(StrUtil.isBlank(dto.getNickname()) ? "user  _" + dto.getPhone().substring(7) : dto.getNickname());
         user.setStatus(1);
+        user.setRole(0); // 默认普通用户
         user.setCreatedAt(new Date());
         user.setUpdatedAt(new Date());
 
@@ -343,6 +344,36 @@ public class AuthServiceImpl implements AuthService {
         }
     }
 
+    // ==================== 修改资料 ====================
+
+    @Override
+    public UserInfoVO updateProfile(Long userId, UpdateProfileDTO dto) {
+        SysUser user = sysUserMapper.selectById(userId);
+        if (user == null) {
+            throw new MovieFrameException(BaseCode.USER_NOT_EXIST);
+        }
+
+        boolean changed = false;
+
+        if (dto.getNickname() != null) {
+            user.setNickname(dto.getNickname());
+            changed = true;
+        }
+
+        if (dto.getAvatar() != null) {
+            user.setAvatar(dto.getAvatar());
+            changed = true;
+        }
+
+        if (changed) {
+            user.setUpdatedAt(new Date());
+            sysUserMapper.updateById(user);
+            log.info("用户资料更新 userId={}", userId);
+        }
+
+        return buildUserInfoVO(user);
+    }
+
     // ==================== 核心私有方法 ====================
 
     /**
@@ -355,7 +386,7 @@ public class AuthServiceImpl implements AuthService {
         String familyId = IdUtil.fastSimpleUUID();
         String refreshTokenId = IdUtil.fastSimpleUUID();
 
-        String accessToken = jwtUtils.generateAccessToken(userId, phone);
+        String accessToken = jwtUtils.generateAccessToken(userId, phone, user.getRole());
         String refreshToken = jwtUtils.generateRefreshToken(userId, refreshTokenId, familyId);
 
         log.info("生成token1:{}",accessToken);
@@ -455,6 +486,7 @@ public class AuthServiceImpl implements AuthService {
         return UserInfoVO.builder()
                 .id(user.getId()).phone(user.getPhone())
                 .nickname(user.getNickname()).avatar(user.getAvatar())
+                .role(user.getRole())
                 .build();
     }
 

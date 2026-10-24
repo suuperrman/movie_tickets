@@ -55,7 +55,7 @@ public class JwtUtils {
     /**
      * 生成 Access Token
      */
-    public String generateAccessToken(Long userId, String phone) {
+    public String generateAccessToken(Long userId, String phone, Integer role) {
         long expireMillis = authProperties.getAccessTokenExpireMinutes() * 60 * 1000L;
         Date now = new Date();
         Date expireAt = new Date(now.getTime() + expireMillis);
@@ -66,6 +66,7 @@ public class JwtUtils {
                 .expiration(expireAt)
                 .claim("uid", userId)
                 .claim("phone", phone)
+                .claim("role", role)
                 .claim("type", "access")
                 .signWith(getSigningKey(), Jwts.SIG.HS256)
                 .compact();
@@ -134,6 +135,14 @@ public class JwtUtils {
         }
         Object phone = claims.get("phone");
         return phone == null ? null : phone.toString();
+    }
+
+    public Integer getRole(Claims claims) {
+        if (claims == null) {
+            return null;
+        }
+        Object role = claims.get("role");
+        return role == null ? 0 : Integer.valueOf(role.toString());
     }
 
     public String getTokenId(Claims claims) {

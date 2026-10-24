@@ -44,6 +44,9 @@ public class SysUser implements Serializable {
     /** 状态：1正常 0禁用 */
     private Integer status;
 
+    /** 角色：0普通用户 1管理员 */
+    private Integer role;
+
     /** 创建时间 */
     private Date createdAt;
 

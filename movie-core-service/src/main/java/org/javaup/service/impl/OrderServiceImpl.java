@@ -11,6 +11,9 @@ import org.javaup.dto.order.*;
 import org.javaup.entity.*;
 import org.javaup.exception.MovieFrameException;
 import org.javaup.mapper.*;
+import org.javaup.core.RedisKeyManage;
+import org.javaup.redis.RedisCache;
+import org.javaup.redis.RedisKeyBuild;
 import org.javaup.service.OrderService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -53,8 +56,33 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private final HallMapper hallMapper;
     private final SysUserMapper sysUserMapper;
     private final SeatMapper seatMapper;
+    private final RedisCache redisCache;
+
+    /** 座位锁定超时（毫秒）：15 分钟 */
+    private static final long SEAT_LOCK_EXPIRE_MS = 15 * 60 * 1000L;
 
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+
+    /** 清除场次座位图缓存 */
+    private void evictSeatMapCache(Long scheduleId) {
+        if (scheduleId == null) return;
+        try {
+            redisCache.del(RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId));
+        } catch (Exception ignore) { /* Redis 挂了不影响主流程 */ }
+    }
+
+    /** 在 Redis ZSET 中投递锁定超时延时任务（score=到期毫秒时间戳） */
+    private void scheduleLockTimeout(Long scheduleId, String seatId, Long orderId, long expireMs) {
+        try {
+            String member = seatId + ":" + orderId;
+            double score = (double) expireMs;
+            RedisKeyBuild zsetKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_LOCK_ZSET, scheduleId);
+            redisCache.addForSortedSet(zsetKey, member, score);
+            log.debug("[锁座延时队列] scheduleId={} member={} expireAt={}", scheduleId, member, new Date(expireMs));
+        } catch (Exception e) {
+            log.warn("[锁座延时队列失败] scheduleId={}: {}", scheduleId, e.getMessage());
+        }
+    }
 
     // ==================== 用户端 1. 创建订单（锁座） ====================
 
@@ -142,6 +170,15 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 .eq(Schedule::getId, dto.getScheduleId())
                 .setSql("available_seat = available_seat - " + seats.size()));
 
+        // ★ 清除座位图缓存（订单操作必失效）
+        evictSeatMapCache(dto.getScheduleId());
+
+        // ★ Redis ZSET 投递 15 分钟后自动释放的延时任务
+        long expireMs = System.currentTimeMillis() + SEAT_LOCK_EXPIRE_MS;
+        for (ScheduleSeat seat : seats) {
+            scheduleLockTimeout(dto.getScheduleId(), String.valueOf(seat.getId()), order.getId(), expireMs);
+        }
+
         log.info("创建订单 orderNo={} userId={} scheduleId={} seatCount={}", order.getOrderNo(), userId, dto.getScheduleId(), seats.size());
         return order;
     }
@@ -187,8 +224,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 .in(ScheduleSeat::getId, items.stream().map(OrderItem::getScheduleSeatId).collect(Collectors.toList()))
                 .eq(ScheduleSeat::getStatus, 1)
                 .set(ScheduleSeat::getStatus, 0)
-                .set(ScheduleSeat::getLockUserId, null)
-                .set(ScheduleSeat::getLockExpireAt, null));
+                // ★ 修复：lockUserId/lockExpireAt 改为 0/NOT NULL 兼容
+                .set(ScheduleSeat::getLockUserId, 0L)
+                .set(ScheduleSeat::getLockExpireAt, new Date(0)));
 
         // 加回 availableSeat
         scheduleMapper.update(null, new LambdaUpdateWrapper<Schedule>()
@@ -200,6 +238,16 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         order.setCancelTime(new Date());
         order.setUpdatedAt(new Date());
         updateById(order);
+
+        // ★ 清除缓存 + 移除延时队列里的该订单条目（避免被自动解锁消费）
+        evictSeatMapCache(order.getScheduleId());
+        try {
+            RedisKeyBuild zsetKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_LOCK_ZSET, order.getScheduleId());
+            for (OrderItem item : items) {
+                redisCache.delForSortedSet(zsetKey, String.valueOf(item.getScheduleSeatId()) + ":" + order.getId());
+            }
+        } catch (Exception ignore) {}
+
         log.info("用户取消订单 orderNo={}", order.getOrderNo());
     }
 
@@ -224,6 +272,16 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         order.setPayTime(new Date());
         order.setUpdatedAt(new Date());
         updateById(order);
+
+        // ★ 清除缓存 + 移除延时队列条目（支付完成无需自动解锁）
+        evictSeatMapCache(order.getScheduleId());
+        try {
+            RedisKeyBuild zsetKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_LOCK_ZSET, order.getScheduleId());
+            for (OrderItem item : items) {
+                redisCache.delForSortedSet(zsetKey, String.valueOf(item.getScheduleSeatId()) + ":" + order.getId());
+            }
+        } catch (Exception ignore) {}
+
         log.info("支付成功 orderNo={}", order.getOrderNo());
     }
 

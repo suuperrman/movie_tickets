@@ -33,4 +33,9 @@ public class UserInfoVO {
      * 头像
      */
     private String avatar;
+
+    /**
+     * 角色：0普通用户 1管理员
+     */
+    private Integer role;
 }

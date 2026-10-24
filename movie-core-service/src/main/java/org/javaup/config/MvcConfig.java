@@ -1,6 +1,7 @@
 package org.javaup.config;
 
 import jakarta.annotation.Resource;
+import org.javaup.interceptors.AdminInterceptor;
 import org.javaup.interceptors.LoginInterceptor;
 import org.javaup.utils.RefreshTokenInterceptor;
 import org.springframework.context.annotation.Configuration;
@@ -24,6 +25,9 @@ public class MvcConfig implements WebMvcConfigurer {
 
     @Resource
     private LoginInterceptor loginInterceptor;
+
+    @Resource
+    private AdminInterceptor adminInterceptor;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
@@ -50,5 +54,11 @@ public class MvcConfig implements WebMvcConfigurer {
                         // ========= Actuator =========
                         "/actuator/**"
                 ).order(1);
+
+        // ==================== 3. 管理员权限拦截器 ====================
+        // 只拦截 /admin/**，需要登录后才能进入此拦截器
+        registry.addInterceptor(adminInterceptor)
+                .addPathPatterns("/admin/**")
+                .order(2);
     }
 }

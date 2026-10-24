@@ -72,7 +72,18 @@ public enum RedisKeyManage {
     SECKILL_USER_LEVEL_MEMBERS_TAG_KEY("seckill:user:level:{%s}:members","用户等级（同槽位HashTag）","SET，member为用户id","k"),
     
     SECKILL_USER_LEVEL_MEMBERS_UNION_TAG_KEY("seckill:user:level:union:{%s}","用户等级范围标签","临时SET，member为用户id","k"),
-    
+
+    // ========== 电影购票系统 ==========
+
+    /** 场次座位图缓存（Bitmap+seatIds 整体 JSON），TTL 30s，订单操作时主动失效 */
+    SCHEDULE_SEAT_MAP_KEY("movie:schedule:seatmap:%s","场次id","SeatMapVO JSON","k"),
+
+    /** 单座位锁定标记 Hash（field=seatId, value=userId），用于快速判断某座是否锁定 */
+    SCHEDULE_SEAT_LOCK_KEY("movie:schedule:seatlock:%s","场次id","HASH field=seatId value=userId","k"),
+
+    /** 锁定超时延时队列（ZSET，member=seatId:orderId，score=到期时间戳） */
+    SCHEDULE_SEAT_LOCK_ZSET("movie:schedule:lock:zset:%s","场次id","ZSET member=seatId:orderId score=过期ms","k"),
+
     ;
 
     /**

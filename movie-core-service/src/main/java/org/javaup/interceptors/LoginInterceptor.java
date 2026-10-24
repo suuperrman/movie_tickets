@@ -63,6 +63,7 @@ public class LoginInterceptor implements HandlerInterceptor {
         // 4. 构建 UserDTO 并存入 ThreadLocal
         Long userId = jwtUtils.getUserId(claims);
         String phone = jwtUtils.getPhone(claims);
+        Integer role = jwtUtils.getRole(claims);
 
         if (userId == null) {
             log.warn("JWT 缺少用户 ID, URI={}", request.getRequestURI());
@@ -73,6 +74,7 @@ public class LoginInterceptor implements HandlerInterceptor {
         UserDTO userDTO = new UserDTO();
         userDTO.setId(userId);
         userDTO.setNickName(phone != null ? phone : "");
+        userDTO.setRole(role != null ? role : 0);
 
         UserHolder.saveUser(userDTO);
         log.debug("JWT 鉴权通过 userId={}, URI={}", userId, request.getRequestURI());

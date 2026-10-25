@@ -59,6 +59,51 @@ public class RedisCacheImpl implements RedisCache {
     }
 
     @Override
+    public <T> T getWithMutex(RedisKeyBuild redisKeyBuild, Class<T> clazz, Supplier<T> dbFallback, long ttl, TimeUnit timeUnit) {
+        return getWithMutex(redisKeyBuild, (Type) clazz, dbFallback, ttl, timeUnit);
+    }
+
+    @Override
+    public <T> T getWithMutex(RedisKeyBuild redisKeyBuild, Type type, Supplier<T> dbFallback, long ttl, TimeUnit timeUnit) {
+        CacheUtil.checkNotBlank(redisKeyBuild);
+        // 1. 查缓存
+        T cached = getByType(redisKeyBuild, type);
+        if (!CacheUtil.isEmpty(cached)) {
+            return cached;
+        }
+        // 2. 缓存未命中，尝试获取互斥锁
+        RedisKeyBuild lockKey = RedisKeyBuild.of("lock:" + redisKeyBuild.getRelKey());
+        boolean locked = false;
+        try {
+            locked = setIfAbsent(lockKey, "1", 10, TimeUnit.SECONDS);
+            if (!locked) {
+                // 获取锁失败，短暂休眠后重试
+                Thread.sleep(50);
+                return getWithMutex(redisKeyBuild, type, dbFallback, ttl, timeUnit);
+            }
+            // 3. 获取锁成功，double check 缓存（可能已被其他线程重建）
+            cached = getByType(redisKeyBuild, type);
+            if (!CacheUtil.isEmpty(cached)) {
+                return cached;
+            }
+            // 4. 查DB
+            T result = dbFallback.get();
+            // 5. 写缓存（空值不缓存，由布隆过滤器负责防穿透）
+            if (!CacheUtil.isEmpty(result)) {
+                set(redisKeyBuild, result, ttl, timeUnit);
+            }
+            return result;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("缓存重建被中断", e);
+        } finally {
+            if (locked) {
+                del(lockKey);
+            }
+        }
+    }
+
+    @Override
     public String getRange(RedisKeyBuild redisKeyBuild, long start, long end) {
         CacheUtil.checkNotBlank(redisKeyBuild);
         String key = redisKeyBuild.getRelKey();
@@ -186,7 +231,9 @@ public class RedisCacheImpl implements RedisCache {
         CacheUtil.checkNotBlank(redisKeyBuild);
         String key = redisKeyBuild.getRelKey();
         String json = object instanceof String ? (String) object : JSON.toJSONString(object);
-        redisTemplate.opsForValue().set(key, json, ttl, timeUnit);
+        // 注入随机偏移TTL，防止大量缓存同时过期导致缓存雪崩
+        long randomTtl = CacheUtil.randomTtl(ttl, timeUnit);
+        redisTemplate.opsForValue().set(key, json, randomTtl, timeUnit);
     }
 
     @Override

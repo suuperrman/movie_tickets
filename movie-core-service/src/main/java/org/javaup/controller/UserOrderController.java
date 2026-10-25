@@ -8,6 +8,7 @@ import org.javaup.dto.Result;
 import org.javaup.dto.order.*;
 import org.javaup.entity.Order;
 import org.javaup.service.OrderService;
+import org.javaup.service.RateLimitService;
 import org.javaup.utils.UserHolder;
 import org.springframework.web.bind.annotation.*;
 
@@ -28,10 +29,13 @@ import org.springframework.web.bind.annotation.*;
 public class UserOrderController {
 
     private final OrderService orderService;
+    private final RateLimitService rateLimitService;
 
     @PostMapping
     public Result<Order> create(@Valid @RequestBody OrderCreateDTO dto) {
         Long userId = UserHolder.getUser().getId();
+        // 用户级限流：10秒内最多3次下单请求，防止恶意刷票
+        rateLimitService.tryAcquire("order_create", String.valueOf(userId), 3, 10);
         log.info("[User] 创建订单 userId={} scheduleId={} seatCount={}", userId, dto.getScheduleId(), dto.getSeatIds().size());
         return Result.ok(orderService.create(userId, dto));
     }
@@ -59,6 +63,8 @@ public class UserOrderController {
     @PostMapping("/{id}/pay")
     public Result<Void> pay(@PathVariable("id") Long id) {
         Long userId = UserHolder.getUser().getId();
+        // 用户级限流：10秒内最多3次支付请求，防止重复提交
+        rateLimitService.tryAcquire("order_pay", String.valueOf(userId), 3, 10);
         log.info("[User] 支付成功 userId={} orderId={}", userId, id);
         orderService.userPay(userId, id);
         return Result.ok();

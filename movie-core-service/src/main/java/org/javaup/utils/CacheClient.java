@@ -5,6 +5,7 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.javaup.redis.CacheUtil;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -35,7 +36,9 @@ public class CacheClient {
     }
 
     public void set(String key, Object value, Long time, TimeUnit unit) {
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+        // 注入随机偏移TTL，防止大量缓存同时过期导致缓存雪崩
+        long randomTtl = CacheUtil.randomTtl(time, unit);
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), randomTtl, unit);
     }
 
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
@@ -67,8 +70,8 @@ public class CacheClient {
         R r = dbFallback.apply(id);
         // 5.不存在，返回错误
         if (r == null) {
-            // 将空值写入redis
-            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+            // 将空值写入redis（带随机TTL，防止大量空值同时过期）
+            stringRedisTemplate.opsForValue().set(key, "", CacheUtil.randomTtl(CACHE_NULL_TTL, TimeUnit.MINUTES), TimeUnit.MINUTES);
             // 返回错误信息
             return null;
         }

@@ -84,6 +84,39 @@ public enum RedisKeyManage {
     /** 锁定超时延时队列（ZSET，member=seatId:orderId，score=到期时间戳） */
     SCHEDULE_SEAT_LOCK_ZSET("movie:schedule:lock:zset:%s","场次id","ZSET member=seatId:orderId score=过期ms","k"),
 
+    /** 用户端电影详情缓存（按 movieId），TTL 30min，电影写操作主动失效 */
+    MOVIE_DETAIL_USER_KEY("movie:detail:user:%s","电影id","MovieDetailVO JSON","k"),
+
+    /** 管理端电影详情缓存（按 movieId），TTL 10min，电影写操作主动失效 */
+    MOVIE_DETAIL_ADMIN_KEY("movie:detail:admin:%s","电影id","MovieDetailVO JSON","k"),
+
+    /** 正在热映分页缓存（按 pageNo:pageSize），TTL 5min，电影/场次写操作主动失效 */
+    MOVIE_NOW_SHOWING_KEY("movie:list:now:%s:%s","页码:页大小","Page<MovieListItemVO> JSON","k"),
+
+    /** 即将上映分页缓存（按 pageNo:pageSize），TTL 5min，电影/场次写操作主动失效 */
+    MOVIE_COMING_SOON_KEY("movie:list:coming:%s:%s","页码:页大小","Page<MovieListItemVO> JSON","k"),
+
+    /** 电影搜索分页缓存（按 keyword:categoryId:pageNo:pageSize），TTL 3min，电影/分类写操作主动失效 */
+    MOVIE_SEARCH_KEY("movie:search:%s:%s:%s:%s","关键词:分类id:页码:页大小","Page<MovieListItemVO> JSON","k"),
+
+    /** 电影→影院列表缓存（按 movieId:city:date），TTL 1min，场次写操作主动失效 */
+    MOVIE_CINEMAS_KEY("movie:cinemas:%s:%s:%s","电影id:城市:日期","List<CinemaScheduleVO> JSON","k"),
+
+    /** 电影+影院→场次列表缓存（按 movieId:cinemaId:date），TTL 30s，场次写操作主动失效 */
+    MOVIE_SESSIONS_KEY("movie:sessions:%s:%s:%s","电影id:影院id:日期","List<ScheduleVO> JSON","k"),
+
+    /** 电影分类列表缓存（单 key），TTL 1h，分类写操作主动失效 */
+    MOVIE_CATEGORY_LIST_KEY("movie:category:list","-","List<MovieCategory> JSON","k"),
+
+    /** 通用接口限流计数（固定窗口），key=rate:limit:{scene}:{identifier}，value=次数 */
+    RATE_LIMIT_KEY("rate:limit:%s:%s","场景:标识","限流计数","k"),
+
+    /** 订单创建幂等防重key，key=order:create:{userId}:{scheduleId}:{seatIdsHash}，value=1，TTL 10s */
+    ORDER_CREATE_IDEMPOTENT_KEY("order:create:%s:%s:%s","用户id:场次id:座位id哈希","幂等标记","k"),
+
+    /** 支付回调幂等key，key=order:pay:{orderId}，value=1，TTL 60s */
+    ORDER_PAY_IDEMPOTENT_KEY("order:pay:%s","订单id","幂等标记","k"),
+
     ;
 
     /**

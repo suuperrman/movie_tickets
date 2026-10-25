@@ -2,6 +2,7 @@ package org.javaup.utils;
 
 
 import cn.hutool.core.util.RandomUtil;
+import org.springframework.stereotype.Component;
 import org.springframework.util.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -10,6 +11,7 @@ import java.nio.charset.StandardCharsets;
  * @description: 密码
  * @author: xiong
  **/
+@Component
 public class PasswordEncoder {
 
     public static String encode(String password) {

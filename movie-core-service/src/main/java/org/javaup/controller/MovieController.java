@@ -6,6 +6,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.javaup.dto.Result;
 import org.javaup.dto.movie.*;
 import org.javaup.service.MovieService;
+import org.javaup.service.RateLimitService;
+import org.javaup.utils.RequestContextUtils;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -20,6 +22,7 @@ import java.util.List;
 public class MovieController {
 
     private final MovieService movieService;
+    private final RateLimitService rateLimitService;
 
     // ==================== 正在热映 ====================
 
@@ -75,6 +78,9 @@ public class MovieController {
 
     @GetMapping("/schedule/{scheduleId:\\d+}/seats")
     public Result<SeatMapVO> seatMap(@PathVariable("scheduleId") Long scheduleId) {
+        // IP级限流：每秒最多50次座位图查询，防止爬虫恶意刷座位状态
+        String clientIp = RequestContextUtils.getClientIp();
+        rateLimitService.tryAcquire("seat_map", clientIp != null ? clientIp : "unknown", 50, 1);
         log.info("[公开] GET /movie/schedule/{}/seats", scheduleId);
         return Result.ok(movieService.seatMap(scheduleId));
     }

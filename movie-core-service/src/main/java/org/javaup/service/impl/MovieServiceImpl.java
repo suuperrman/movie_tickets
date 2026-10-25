@@ -15,7 +15,10 @@ import org.javaup.mapper.*;
 import org.javaup.core.RedisKeyManage;
 import org.javaup.redis.RedisCache;
 import org.javaup.redis.RedisKeyBuild;
+import org.javaup.service.BloomFilterService;
 import org.javaup.service.MovieService;
+import org.javaup.utils.MovieCacheEvictHelper;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,6 +30,8 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -47,6 +52,9 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     private final CinemaMapper cinemaMapper;
     private final HallMapper hallMapper;
     private final RedisCache redisCache;
+    private final StringRedisTemplate stringRedisTemplate;
+    private final MovieCacheEvictHelper cacheEvictHelper;
+    private final BloomFilterService bloomFilterService;
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final DateTimeFormatter DATE_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
@@ -76,6 +84,10 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         saveActorRelations(movie.getId(), dto.getActors());
 
         log.info("新增电影 id={} name={}", movie.getId(), movie.getName());
+        // 同步加入布隆过滤器，防止新电影ID被误判为不存在
+        bloomFilterService.addMovieId(movie.getId());
+        // 失效列表/搜索缓存（新电影可能进入热映/即将上映/搜索结果）
+        cacheEvictHelper.evictMovieListAll();
         return movie;
     }
 
@@ -125,6 +137,10 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         }
 
         log.info("修改电影 id={}", id);
+        // 失效详情 / 列表 / 搜索 / 影院场次 缓存（改名字/分类/演员会影响搜索和详情）
+        cacheEvictHelper.evictMovieDetail(id);
+        cacheEvictHelper.evictMovieListAll();
+        cacheEvictHelper.evictMovieCinemas(id);
     }
 
     // ========== 管理端：3. 删除（有进行中场次则拒绝） ==========
@@ -153,6 +169,10 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         removeById(id);
 
         log.info("删除电影 id={}", id);
+        // 失效详情 / 列表 / 搜索 / 影院场次 缓存
+        cacheEvictHelper.evictMovieDetail(id);
+        cacheEvictHelper.evictMovieListAll();
+        cacheEvictHelper.evictMovieCinemas(id);
     }
 
     // ========== 管理端：4. 上下架 ==========
@@ -167,6 +187,9 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         movie.setUpdatedAt(new Date());
         updateById(movie);
         log.info("电影上下架 id={} status={}", id, status);
+        // 上下架影响详情可见性 + 列表显示
+        cacheEvictHelper.evictMovieDetail(id);
+        cacheEvictHelper.evictMovieListAll();
     }
 
     // ========== 管理端：5. 分页查询 ==========
@@ -191,90 +214,177 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
 
     @Override
     public MovieDetailVO detailForAdmin(Long id) {
-        Movie movie = getById(id);
-        if (movie == null) {
+        // 布隆过滤器防穿透：ID不存在直接返回，不查DB不查缓存
+        if (!bloomFilterService.containsMovieId(id)) {
             throw new MovieFrameException(BaseCode.USER_NOT_EXIST);
         }
-        return buildDetail(movie, true);
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.MOVIE_DETAIL_ADMIN_KEY, id);
+        Supplier<MovieDetailVO> dbFallback = () -> {
+            Movie movie = getById(id);
+            if (movie == null) {
+                throw new MovieFrameException(BaseCode.USER_NOT_EXIST);
+            }
+            return buildDetail(movie, true);
+        };
+        try {
+            return redisCache.getWithMutex(key, MovieDetailVO.class, dbFallback, 10, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("[缓存互斥锁查询失败，降级直查DB] movieDetailAdmin id={}: {}", id, e.getMessage());
+            return dbFallback.get();
+        }
     }
 
     // ========== 用户端：7. 正在热映 ==========
 
     @Override
     public Page<MovieListItemVO> nowShowing(MovieListQuery query) {
-        LocalDate today = LocalDate.now();
-        LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(Movie::getStatus, 1);
-        wrapper.le(Movie::getReleaseDate, Date.from(today.atStartOfDay(ZoneId.systemDefault()).toInstant()));
-        wrapper.orderByDesc(Movie::getReleaseDate);
-        return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), query.getCity());
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.MOVIE_NOW_SHOWING_KEY,
+                query.getPageNo(), query.getPageSize());
+        Supplier<Page<MovieListItemVO>> dbFallback = () -> {
+            LocalDate today = LocalDate.now();
+            LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(Movie::getStatus, 1);
+            wrapper.le(Movie::getReleaseDate, Date.from(today.atStartOfDay(ZoneId.systemDefault()).toInstant()));
+            wrapper.orderByDesc(Movie::getReleaseDate);
+            return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), query.getCity());
+        };
+        try {
+            return redisCache.getWithMutex(key,
+                    new com.alibaba.fastjson.TypeReference<Page<MovieListItemVO>>(){}.getType(),
+                    dbFallback, 5, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("[缓存互斥锁查询失败，降级直查DB] nowShowing: {}", e.getMessage());
+            return dbFallback.get();
+        }
     }
 
     // ========== 用户端：8. 即将上映 ==========
 
     @Override
     public Page<MovieListItemVO> comingSoon(MovieListQuery query) {
-        LocalDate today = LocalDate.now();
-        LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(Movie::getStatus, 1);
-        wrapper.gt(Movie::getReleaseDate, Date.from(today.atStartOfDay(ZoneId.systemDefault()).toInstant()));
-        wrapper.orderByAsc(Movie::getReleaseDate);
-        return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), query.getCity());
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.MOVIE_COMING_SOON_KEY,
+                query.getPageNo(), query.getPageSize());
+        Supplier<Page<MovieListItemVO>> dbFallback = () -> {
+            LocalDate today = LocalDate.now();
+            LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(Movie::getStatus, 1);
+            wrapper.gt(Movie::getReleaseDate, Date.from(today.atStartOfDay(ZoneId.systemDefault()).toInstant()));
+            wrapper.orderByAsc(Movie::getReleaseDate);
+            return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), query.getCity());
+        };
+        try {
+            return redisCache.getWithMutex(key,
+                    new com.alibaba.fastjson.TypeReference<Page<MovieListItemVO>>(){}.getType(),
+                    dbFallback, 5, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("[缓存互斥锁查询失败，降级直查DB] comingSoon: {}", e.getMessage());
+            return dbFallback.get();
+        }
     }
 
     // ========== 用户端：9. 详情 ==========
 
     @Override
     public MovieDetailVO detailForUser(Long id) {
-        Movie movie = getById(id);
-        if (movie == null || movie.getStatus() != 1) {
+        // 布隆过滤器防穿透：ID不存在直接返回
+        if (!bloomFilterService.containsMovieId(id)) {
             throw new MovieFrameException(BaseCode.USER_NOT_EXIST);
         }
-        return buildDetail(movie, false);
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.MOVIE_DETAIL_USER_KEY, id);
+        Supplier<MovieDetailVO> dbFallback = () -> {
+            Movie movie = getById(id);
+            if (movie == null || movie.getStatus() != 1) {
+                throw new MovieFrameException(BaseCode.USER_NOT_EXIST);
+            }
+            return buildDetail(movie, false);
+        };
+        try {
+            return redisCache.getWithMutex(key, MovieDetailVO.class, dbFallback, 30, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("[缓存互斥锁查询失败，降级直查DB] movieDetailUser id={}: {}", id, e.getMessage());
+            return dbFallback.get();
+        }
     }
 
     // ========== 用户端：10. 搜索 ==========
 
     @Override
     public Page<MovieListItemVO> search(MovieSearchQuery query) {
-        LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(Movie::getStatus, 1);
-        if (StrUtil.isNotBlank(query.getKeyword())) {
-            List<Long> movieIds = collectMovieIdsBySearch(query.getKeyword());
-            if (movieIds.isEmpty()) {
-                return new Page<>(query.getPageNo(), query.getPageSize());
+        String kw = StrUtil.isBlank(query.getKeyword()) ? "-" : query.getKeyword();
+        String catId = query.getCategoryId() == null ? "-" : String.valueOf(query.getCategoryId());
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.MOVIE_SEARCH_KEY,
+                kw, catId, query.getPageNo(), query.getPageSize());
+        Supplier<Page<MovieListItemVO>> dbFallback = () -> {
+            LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
+            wrapper.eq(Movie::getStatus, 1);
+            if (StrUtil.isNotBlank(query.getKeyword())) {
+                List<Long> movieIds = collectMovieIdsBySearch(query.getKeyword());
+                if (movieIds.isEmpty()) {
+                    return new Page<>(query.getPageNo(), query.getPageSize());
+                }
+                wrapper.in(Movie::getId, movieIds);
             }
-            wrapper.in(Movie::getId, movieIds);
-        }
-        if (query.getCategoryId() != null) {
-            List<Long> movieIds = categoryRelMapper.selectList(
-                    new LambdaQueryWrapper<MovieCategoryRel>().eq(MovieCategoryRel::getCategoryId, query.getCategoryId()))
-                    .stream().map(MovieCategoryRel::getMovieId).collect(Collectors.toList());
-            if (movieIds.isEmpty()) {
-                return new Page<>(query.getPageNo(), query.getPageSize());
+            if (query.getCategoryId() != null) {
+                List<Long> movieIds = categoryRelMapper.selectList(
+                        new LambdaQueryWrapper<MovieCategoryRel>().eq(MovieCategoryRel::getCategoryId, query.getCategoryId()))
+                        .stream().map(MovieCategoryRel::getMovieId).collect(Collectors.toList());
+                if (movieIds.isEmpty()) {
+                    return new Page<>(query.getPageNo(), query.getPageSize());
+                }
+                wrapper.in(Movie::getId, movieIds);
             }
-            wrapper.in(Movie::getId, movieIds);
+            wrapper.orderByDesc(Movie::getReleaseDate);
+            return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), null);
+        };
+        try {
+            return redisCache.getWithMutex(key,
+                    new com.alibaba.fastjson.TypeReference<Page<MovieListItemVO>>(){}.getType(),
+                    dbFallback, 3, TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("[缓存互斥锁查询失败，降级直查DB] search: {}", e.getMessage());
+            return dbFallback.get();
         }
-        wrapper.orderByDesc(Movie::getReleaseDate);
-        return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), null);
     }
 
     // ========== 用户端：11. 购票入口：哪些影院有该电影场次 ==========
 
     @Override
     public List<CinemaScheduleVO> cinemasForMovie(Long movieId, String city, String dateStr) {
+        // 布隆过滤器防穿透：电影ID不存在直接返回空列表
+        if (!bloomFilterService.containsMovieId(movieId)) {
+            return Collections.emptyList();
+        }
         LocalDate date = parseLocalDateOrToday(dateStr);
+        String cityKey = StrUtil.isBlank(city) ? "-" : city;
+        String dateKey = date.format(DATE_FMT);
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.MOVIE_CINEMAS_KEY,
+                movieId, cityKey, dateKey);
+        try {
+            List<CinemaScheduleVO> cached = redisCache.getByType(key,
+                    new com.alibaba.fastjson.TypeReference<List<CinemaScheduleVO>>(){}.getType());
+            if (cached != null) {
+                log.debug("[缓存命中] cinemasForMovie movieId={} city={} date={}", movieId, cityKey, dateKey);
+                return cached;
+            }
+        } catch (Exception e) {
+            log.warn("[缓存读取失败] cinemasForMovie: {}", e.getMessage());
+        }
+
         Date dayStart = Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
         Date dayEnd = Date.from(date.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant());
 
-        // 查出该电影指定日期内所有场次
+        // 查出该电影指定日期内所有场次（过滤已结束的）
         List<Schedule> sessions = scheduleMapper.selectList(new LambdaQueryWrapper<Schedule>()
                 .eq(Schedule::getMovieId, movieId)
                 .ge(Schedule::getStartTime, dayStart)
                 .lt(Schedule::getStartTime, dayEnd)
-                .eq(Schedule::getStatus, 1));
+                .eq(Schedule::getStatus, 1)
+                .gt(Schedule::getEndTime, new Date()));
 
         if (sessions.isEmpty()) {
+            try {
+                redisCache.set(key, Collections.<CinemaScheduleVO>emptyList(), 1, java.util.concurrent.TimeUnit.MINUTES);
+            } catch (Exception ignored) {}
             return Collections.emptyList();
         }
 
@@ -287,7 +397,7 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         List<Cinema> cinemas = cinemaMapper.selectBatchIds(cinemaIds);
         Map<Long, Cinema> cinemaMap = cinemas.stream().collect(Collectors.toMap(Cinema::getId, c -> c));
 
-        return byCinema.entrySet().stream()
+        List<CinemaScheduleVO> result = byCinema.entrySet().stream()
                 .filter(e -> {
                     if (city != null && !city.isEmpty()) {
                         Cinema c = cinemaMap.get(e.getKey());
@@ -317,13 +427,38 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                 })
                 .sorted(Comparator.comparing(CinemaScheduleVO::getFirstScheduleTime))
                 .collect(Collectors.toList());
+
+        try {
+            redisCache.set(key, result, 1, java.util.concurrent.TimeUnit.MINUTES);
+        } catch (Exception e) {
+            log.warn("[缓存写入失败] cinemasForMovie: {}", e.getMessage());
+        }
+        return result;
     }
 
     // ========== 用户端：12. 指定影院指定日期场次 ==========
 
     @Override
     public List<ScheduleVO> schedulesForMovie(Long movieId, Long cinemaId, String dateStr) {
+        // 布隆过滤器防穿透：电影ID不存在直接返回空列表
+        if (!bloomFilterService.containsMovieId(movieId)) {
+            return Collections.emptyList();
+        }
         LocalDate date = parseLocalDateOrToday(dateStr);
+        String dateKey = date.format(DATE_FMT);
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.MOVIE_SESSIONS_KEY,
+                movieId, cinemaId, dateKey);
+        try {
+            List<ScheduleVO> cached = redisCache.getByType(key,
+                    new com.alibaba.fastjson.TypeReference<List<ScheduleVO>>(){}.getType());
+            if (cached != null) {
+                log.debug("[缓存命中] schedulesForMovie movieId={} cinemaId={} date={}", movieId, cinemaId, dateKey);
+                return cached;
+            }
+        } catch (Exception e) {
+            log.warn("[缓存读取失败] schedulesForMovie: {}", e.getMessage());
+        }
+
         Date dayStart = Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
         Date dayEnd = Date.from(date.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant());
 
@@ -333,9 +468,13 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                 .ge(Schedule::getStartTime, dayStart)
                 .lt(Schedule::getStartTime, dayEnd)
                 .eq(Schedule::getStatus, 1)
+                .gt(Schedule::getEndTime, new Date())
                 .orderByAsc(Schedule::getStartTime));
 
         if (sessions.isEmpty()) {
+            try {
+                redisCache.set(key, Collections.<ScheduleVO>emptyList(), 30, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (Exception ignored) {}
             return Collections.emptyList();
         }
 
@@ -344,7 +483,7 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         Map<Long, Hall> hallMap = hallMapper.selectBatchIds(hallIds).stream()
                 .collect(Collectors.toMap(Hall::getId, h -> h));
 
-        return sessions.stream().map(s -> {
+        List<ScheduleVO> result = sessions.stream().map(s -> {
             Hall hall = hallMap.get(s.getHallId());
             return ScheduleVO.builder()
                     .scheduleId(s.getId())
@@ -359,6 +498,13 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                     .status(s.getStatus())
                     .build();
         }).collect(Collectors.toList());
+
+        try {
+            redisCache.set(key, result, 30, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("[缓存写入失败] schedulesForMovie: {}", e.getMessage());
+        }
+        return result;
     }
 
     // ========== 用户端：13. 选座页面座位图 ==========
@@ -366,27 +512,33 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     @Override
     @Transactional(readOnly = true)
     public SeatMapVO seatMap(Long scheduleId) {
-        // ★ Redis 缓存：先查 Redis，miss 时查 DB 并写入，TTL 30s
+        // 布隆过滤器防穿透：场次ID不存在直接返回
+        if (!bloomFilterService.containsScheduleId(scheduleId)) {
+            throw new MovieFrameException("场次不存在或已停售");
+        }
+        // ★ 先校验场次有效性（不能只靠缓存！缓存命中也可能场次已过期）
+        Schedule schedule = scheduleMapper.selectById(scheduleId);
+        if (schedule == null || schedule.getStatus() != 1) {
+            throw new MovieFrameException("场次不存在或已停售");
+        }
+        if (schedule.getEndTime() != null && schedule.getEndTime().before(new Date())) {
+            // 过期场次 → 清掉残留缓存 + 报错
+            try {
+                String cacheKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId).getRelKey();
+                stringRedisTemplate.delete(cacheKey);
+            } catch (Exception ignored) {}
+            throw new MovieFrameException("场次已结束，无法查看座位");
+        }
+
+        // ★ Redis 缓存：场次有效才查缓存（互斥锁防击穿）
         RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId);
+        Supplier<SeatMapVO> dbFallback = () -> doSeatMapQuery(scheduleId);
         try {
-            SeatMapVO cached = redisCache.get(key, SeatMapVO.class);
-            if (cached != null) {
-                log.debug("[缓存命中] seatmap scheduleId={}", scheduleId);
-                return cached;
-            }
+            return redisCache.getWithMutex(key, SeatMapVO.class, dbFallback, 100, TimeUnit.SECONDS);
         } catch (Exception e) {
-            log.warn("[缓存读取失败] seatmap scheduleId={}: {}", scheduleId, e.getMessage());
+            log.warn("[缓存互斥锁查询失败，降级直查DB] seatmap scheduleId={}: {}", scheduleId, e.getMessage());
+            return dbFallback.get();
         }
-
-        // 缓存 miss，执行原始查询 + 编码
-        SeatMapVO vo = doSeatMapQuery(scheduleId);
-
-        try {
-            redisCache.set(key, vo, 100, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.warn("[缓存写入失败] seatmap scheduleId={}: {}", scheduleId, e.getMessage());
-        }
-        return vo;
     }
 
     /**
@@ -396,6 +548,10 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         Schedule schedule = scheduleMapper.selectById(scheduleId);
         if (schedule == null || schedule.getStatus() != 1) {
             throw new MovieFrameException("场次不存在或已停售");
+        }
+        // ★ 过期场次也拒绝查询（防止用户手动改 URL 绕过）
+        if (schedule.getEndTime() != null && schedule.getEndTime().before(new Date())) {
+            throw new MovieFrameException("场次已结束，无法查看座位");
         }
 
         Hall hall = hallMapper.selectById(schedule.getHallId());

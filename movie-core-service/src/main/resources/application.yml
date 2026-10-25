@@ -74,16 +74,16 @@ mybatis-plus:
     local-cache-scope: statement
 # logging 完全由 logback-spring.xml 控制，这里留空
 logging: {}
-#bloom-filter:
-#  filters:
-#    shop:
-#      name: shop-id-bloom
-#      expected-insertions: 50000
-#      false-probability: 0.01
-#    voucher:
-#      name: voucher-id-bloom
-#      expected-insertions: 100000
-#      false-probability: 0.01
+bloom-filter:
+  filters:
+    movie:
+      name: movie-id-bloom
+      expected-insertions: 50000
+      false-probability: 0.01
+    schedule:
+      name: schedule-id-bloom
+      expected-insertions: 100000
+      false-probability: 0.01
 # ========== 登录模块配置 ==========
 auth:
   # JWT 签名密钥（生产环境必须通过环境变量 AUTH_JWT_SECRET 注入！）

@@ -63,7 +63,7 @@ public class AuthServiceImpl implements AuthService {
         SysUser user = new SysUser();
         user.setPhone(dto.getPhone());
         user.setPassword(passwordEncoder.encode(dto.getPassword()));
-        user.setNickname(StrUtil.isBlank(dto.getNickname()) ? "user  _" + dto.getPhone().substring(7) : dto.getNickname());
+        user.setNickname(StrUtil.isBlank(dto.getNickname()) ? "user_" + dto.getPhone().substring(7) : dto.getNickname());
         user.setStatus(1);
         user.setRole(0); // 默认普通用户
         user.setCreatedAt(new Date());

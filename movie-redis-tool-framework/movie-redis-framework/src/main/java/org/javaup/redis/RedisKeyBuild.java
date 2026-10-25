@@ -36,6 +36,16 @@ public final class RedisKeyBuild {
     public static String getRedisKey(RedisKeyManage redisKeyManage) {
         return SpringUtil.getPrefixDistinctionName() + "-" + redisKeyManage.getKey();
     }
+
+    /**
+     * 直接从字符串构建 RedisKeyBuild（用于锁key等非业务key场景）
+     *
+     * @param key 完整的redis key
+     * @return RedisKeyBuild
+     */
+    public static RedisKeyBuild of(String key) {
+        return new RedisKeyBuild(key);
+    }
     
     @Override
     public boolean equals(Object o) {

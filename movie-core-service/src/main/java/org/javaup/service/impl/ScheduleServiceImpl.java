@@ -12,9 +12,17 @@ import org.javaup.dto.schedule.ScheduleSaveDTO;
 import org.javaup.entity.*;
 import org.javaup.exception.MovieFrameException;
 import org.javaup.mapper.*;
+import org.javaup.redis.RedisCache;
+import org.javaup.redis.RedisKeyBuild;
+import org.javaup.core.RedisKeyManage;
+import org.javaup.service.BloomFilterService;
+import org.javaup.service.MovieService;
 import org.javaup.service.ScheduleService;
+import org.javaup.utils.MovieCacheEvictHelper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -40,6 +48,10 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
     private final HallMapper hallMapper;
     private final SeatMapper seatMapper;
     private final ScheduleSeatMapper scheduleSeatMapper;
+    private final MovieCacheEvictHelper cacheEvictHelper;
+    private final BloomFilterService bloomFilterService;
+    private final MovieService movieService;
+    private final RedisCache redisCache;
 
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
@@ -132,6 +144,30 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
         }
 
         log.info("新增场次 id={} movieId={} hallId={} start={}", schedule.getId(), dto.getMovieId(), dto.getHallId(), dto.getStartTime());
+        // 同步加入布隆过滤器，防止新场次ID被误判为不存在
+        bloomFilterService.addScheduleId(schedule.getId());
+        // 失效：热映/即将上映列表（cinemaCount 变化）、电影详情（minPrice/cinemaCount）、该电影的影院/场次列表
+        cacheEvictHelper.evictMovieListAll();
+        cacheEvictHelper.evictMovieDetail(schedule.getMovieId());
+        cacheEvictHelper.evictMovieCinemas(schedule.getMovieId());
+
+        // ===== 座位图预热：事务提交后异步重建缓存，热门场次开票即热点 =====
+        Long scheduleId = schedule.getId();
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    try {
+                        // 删除旧缓存，强制重建
+                        redisCache.del(RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId));
+                        movieService.seatMap(scheduleId);
+                        log.info("[座位图预热完成] scheduleId={}", scheduleId);
+                    } catch (Exception e) {
+                        log.warn("[座位图预热失败] scheduleId={}: {}", scheduleId, e.getMessage());
+                    }
+                }
+            });
+        }
         return schedule;
     }
 
@@ -169,6 +205,11 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
         schedule.setUpdatedAt(new Date());
         updateById(schedule);
         log.info("修改场次 id={}", id);
+        // 失效：列表（cinemaCount）、详情（minPrice）、影院/场次列表（价格时间变化）、座位图（价格变化）
+        cacheEvictHelper.evictMovieListAll();
+        cacheEvictHelper.evictMovieDetail(schedule.getMovieId());
+        cacheEvictHelper.evictMovieCinemas(schedule.getMovieId());
+        cacheEvictHelper.evictSeatMap(id);
     }
 
     // ==================== 3. 删除（有座位锁定/售票则拒绝） ====================
@@ -190,6 +231,11 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
         scheduleSeatMapper.delete(new LambdaQueryWrapper<ScheduleSeat>().eq(ScheduleSeat::getScheduleId, id));
         removeById(id);
         log.info("删除场次 id={}", id);
+        // 失效：列表、详情、影院/场次列表、座位图
+        cacheEvictHelper.evictMovieListAll();
+        cacheEvictHelper.evictMovieDetail(schedule.getMovieId());
+        cacheEvictHelper.evictMovieCinemas(schedule.getMovieId());
+        cacheEvictHelper.evictSeatMap(id);
     }
 
     // ==================== 4. 启停用 ====================
@@ -204,6 +250,11 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
         schedule.setUpdatedAt(new Date());
         updateById(schedule);
         log.info("场次启停用 id={} status={}", id, status);
+        // 失效：列表、详情、影院/场次列表、座位图
+        cacheEvictHelper.evictMovieListAll();
+        cacheEvictHelper.evictMovieDetail(schedule.getMovieId());
+        cacheEvictHelper.evictMovieCinemas(schedule.getMovieId());
+        cacheEvictHelper.evictSeatMap(id);
     }
 
     // ==================== 5. 分页查询 ====================

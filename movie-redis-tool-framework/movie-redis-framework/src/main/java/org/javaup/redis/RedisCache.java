@@ -45,6 +45,36 @@ public interface RedisCache {
     <T> T get(RedisKeyBuild redisKeyBuild, Class<T> clazz, Supplier<T> supplier, long ttl, TimeUnit timeUnit);
 
     /**
+     * 带互斥锁的缓存查询，防止热点key过期时大量请求同时击穿数据库（缓存击穿防护）。
+     * <p>
+     * 流程：查缓存 → 未命中则尝试获取互斥锁 → 获取锁成功则查DB并写缓存 → 释放锁；
+     * 获取锁失败则短暂休眠后重试。获取锁成功后会double check缓存，避免重复查DB。
+     * </p>
+     *
+     * @param redisKeyBuild 缓存key
+     * @param clazz         返回类型
+     * @param dbFallback    缓存未命中时的DB查询逻辑
+     * @param ttl           过期时间
+     * @param timeUnit      时间单位
+     * @param <T>           泛型
+     * @return 查询结果，DB无数据时返回null
+     */
+    <T> T getWithMutex(RedisKeyBuild redisKeyBuild, Class<T> clazz, Supplier<T> dbFallback, long ttl, TimeUnit timeUnit);
+
+    /**
+     * 带互斥锁的缓存查询（支持泛型类型，如 {@code Page<XxxVO>}）。
+     *
+     * @param redisKeyBuild 缓存key
+     * @param type          返回类型（含泛型信息）
+     * @param dbFallback    缓存未命中时的DB查询逻辑
+     * @param ttl           过期时间
+     * @param timeUnit      时间单位
+     * @param <T>           泛型
+     * @return 查询结果
+     */
+    <T> T getWithMutex(RedisKeyBuild redisKeyBuild, Type type, Supplier<T> dbFallback, long ttl, TimeUnit timeUnit);
+
+    /**
      * 返回 key 中字符串值的子字符
      * @param redisKeyBuild 缓存key
      * @param start 开始

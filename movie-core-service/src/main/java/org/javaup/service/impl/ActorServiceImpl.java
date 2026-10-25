@@ -16,6 +16,7 @@ import org.javaup.exception.MovieFrameException;
 import org.javaup.mapper.ActorMapper;
 import org.javaup.mapper.MovieActorRelMapper;
 import org.javaup.service.ActorService;
+import org.javaup.utils.MovieCacheEvictHelper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,6 +39,7 @@ public class ActorServiceImpl extends ServiceImpl<ActorMapper, Actor> implements
 
     private final ActorMapper actorMapper;
     private final MovieActorRelMapper actorRelMapper;
+    private final MovieCacheEvictHelper cacheEvictHelper;
 
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
@@ -76,6 +78,8 @@ public class ActorServiceImpl extends ServiceImpl<ActorMapper, Actor> implements
         actor.setUpdatedAt(new Date());
         updateById(actor);
         log.info("修改演员 id={}", id);
+        // 演员信息变化会影响所有引用该演员的电影详情中的 actors 字段，直接失效所有电影详情
+        cacheEvictHelper.evictAllMovieDetail();
     }
 
     // ==================== 3. 删除（被电影引用则拒绝） ====================
@@ -108,6 +112,8 @@ public class ActorServiceImpl extends ServiceImpl<ActorMapper, Actor> implements
         actor.setUpdatedAt(new Date());
         updateById(actor);
         log.info("演员启停用 id={} status={}", id, status);
+        // 演员状态变化会影响电影详情中的 actors 字段
+        cacheEvictHelper.evictAllMovieDetail();
     }
 
     // ==================== 5. 分页查询 ====================

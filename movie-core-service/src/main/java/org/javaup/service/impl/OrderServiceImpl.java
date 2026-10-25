@@ -14,18 +14,22 @@ import org.javaup.mapper.*;
 import org.javaup.core.RedisKeyManage;
 import org.javaup.redis.RedisCache;
 import org.javaup.redis.RedisKeyBuild;
+import org.javaup.service.BloomFilterService;
 import org.javaup.service.OrderService;
+import org.javaup.service.RateLimitService;
+import org.javaup.utils.MovieCacheEvictHelper;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.Date;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -57,18 +61,57 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private final SysUserMapper sysUserMapper;
     private final SeatMapper seatMapper;
     private final RedisCache redisCache;
+    private final StringRedisTemplate stringRedisTemplate;
+    private final BloomFilterService bloomFilterService;
+    private final MovieCacheEvictHelper cacheEvictHelper;
 
     /** 座位锁定超时（毫秒）：15 分钟 */
     private static final long SEAT_LOCK_EXPIRE_MS = 15 * 60 * 1000L;
 
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-    /** 清除场次座位图缓存 */
+    /**
+     * 清除场次座位图缓存 —— 事务提交后再删！
+     *
+     * 旧实现（直接调 redisCache.del）有经典「先删缓存后提交事务」Race Condition：
+     *   UPDATE seat SET status=1  ← DB 写但还没 COMMIT
+     *   del(cache)                ← 先删！
+     *   ┌─ 并发 seatMap() → cache MISS → SELECT FROM DB（READ_COMMITTED）
+     *   │   → 读到 OLD status=0（事务没提交！）→ 把脏状态写回缓存！
+     *   │   → 新用户进来看到"可售" → 撞车！
+     *   └─ COMMIT                 ← 但缓存已经脏了！永久错误！
+     *
+     * 修复：注册 TransactionSynchronization.afterCommit() 回调
+     *   事务 COMMIT 后再 DEL cache → 并发 seatMap 进来要么 HIT（还没 DEL）
+     *   要么 MISS（DB 已提交）→ 两种情况都正确
+     *
+     * 兼容：非事务上下文（单测/手动调用）直接清
+     */
     private void evictSeatMapCache(Long scheduleId) {
         if (scheduleId == null) return;
+        String cacheKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId).getRelKey();
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            // 在 Spring @Transactional 里 → 注册提交后回调
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    doDelCache(cacheKey);
+                }
+            });
+        } else {
+            // 不在事务中 → 直接清
+            doDelCache(cacheKey);
+        }
+    }
+
+    /** 实际执行 Redis DEL（try-catch 吞掉异常，Redis 挂了不影响主流程） */
+    private void doDelCache(String cacheKey) {
         try {
-            redisCache.del(RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId));
-        } catch (Exception ignore) { /* Redis 挂了不影响主流程 */ }
+            stringRedisTemplate.delete(cacheKey);
+            log.info("[缓存失效] seatmap key={}", cacheKey);
+        } catch (Exception e) {
+            log.warn("[缓存失效失败] seatmap key={}: {}", cacheKey, e.getMessage());
+        }
     }
 
     /** 在 Redis ZSET 中投递锁定超时延时任务（score=到期毫秒时间戳） */
@@ -89,9 +132,52 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Order create(Long userId, OrderCreateDTO dto) {
+        // ===== 幂等防重：同一用户10秒内不能对同一场次相同座位重复下单 =====
+        String seatIdsHash = cn.hutool.core.util.StrUtil.join(",", dto.getSeatIds().stream().sorted().toArray());
+        String idempotentKey = RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_CREATE_IDEMPOTENT_KEY,
+                userId, dto.getScheduleId(), cn.hutool.crypto.SecureUtil.md5(seatIdsHash)).getRelKey();
+        Boolean acquired = stringRedisTemplate.opsForValue().setIfAbsent(idempotentKey, "1", 10, java.util.concurrent.TimeUnit.SECONDS);
+        if (Boolean.FALSE.equals(acquired)) {
+            throw new MovieFrameException("请勿重复提交订单");
+        }
+
+        // ===== 布隆过滤器防穿透：场次ID不存在直接返回 =====
+        if (!bloomFilterService.containsScheduleId(dto.getScheduleId())) {
+            throw new MovieFrameException("场次不存在");
+        }
+
+        // ===== 座位图Redis前置过滤：缓存中座位已占用则快速失败，不查DB =====
+        try {
+            RedisKeyBuild seatMapKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, dto.getScheduleId());
+            org.javaup.dto.movie.SeatMapVO cachedSeatMap = redisCache.get(seatMapKey, org.javaup.dto.movie.SeatMapVO.class);
+            if (cachedSeatMap != null && cachedSeatMap.getSeatIds() != null && cachedSeatMap.getSeatStatusBitmap() != null) {
+                Map<Long, Integer> seatIndexMap = new HashMap<>();
+                for (int i = 0; i < cachedSeatMap.getSeatIds().size(); i++) {
+                    seatIndexMap.put(Long.valueOf(cachedSeatMap.getSeatIds().get(i)), i);
+                }
+                for (Long seatId : dto.getSeatIds()) {
+                    Integer idx = seatIndexMap.get(seatId);
+                    if (idx != null) {
+                        int status = org.javaup.utils.SeatBitmapUtil.getSeatStatus(cachedSeatMap.getSeatStatusBitmap(), idx);
+                        if (status != 0) {
+                            throw new MovieFrameException("座位已被占用，请刷新后重选");
+                        }
+                    }
+                }
+            }
+        } catch (MovieFrameException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[座位图前置过滤失败，继续走DB校验] scheduleId={}: {}", dto.getScheduleId(), e.getMessage());
+        }
+
         Schedule schedule = scheduleMapper.selectById(dto.getScheduleId());
         if (schedule == null) throw new MovieFrameException("场次不存在");
         if (schedule.getStatus() != 1) throw new MovieFrameException("该场次已停售");
+        // ★ 过期场次也不允许下单（防手改 URL 绕过）
+        if (schedule.getEndTime() != null && schedule.getEndTime().before(new java.util.Date())) {
+            throw new MovieFrameException("场次已结束，无法购票");
+        }
         if (dto.getSeatIds().size() > schedule.getAvailableSeat()) {
             throw new MovieFrameException("可选座位不足");
         }
@@ -259,7 +345,15 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         Order order = getById(orderId);
         if (order == null) throw new MovieFrameException("订单不存在");
         if (!order.getUserId().equals(userId)) throw new MovieFrameException("无权操作");
-        if (order.getStatus() != 0) throw new MovieFrameException("订单状态不允许支付");
+
+        // ===== 支付幂等：订单已支付则直接返回成功，防止回调/前端重复触发 =====
+        if (order.getStatus() == 1) {
+            log.info("[支付幂等] 订单已支付，直接返回 orderNo={}", order.getOrderNo());
+            return;
+        }
+        if (order.getStatus() != 0) {
+            throw new MovieFrameException("订单状态不允许支付");
+        }
 
         // 锁定→已售（1→2）
         List<OrderItem> items = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId));
@@ -343,6 +437,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         order.setCancelTime(new Date());
         order.setUpdatedAt(new Date());
         updateById(order);
+
+        // ★ 退款后座位从已售→可售，必须清缓存（旧代码漏掉了！）
+        evictSeatMapCache(order.getScheduleId());
+
         log.info("管理端退款 orderNo={} reason={}", order.getOrderNo(), reason);
     }
 

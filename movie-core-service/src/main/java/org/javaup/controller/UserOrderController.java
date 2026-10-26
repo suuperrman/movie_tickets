@@ -69,4 +69,14 @@ public class UserOrderController {
         orderService.userPay(userId, id);
         return Result.ok();
     }
+
+    @PostMapping("/{id}/refund")
+    public Result<Void> applyRefund(@PathVariable("id") Long id, @Valid @RequestBody RefundApplyDTO dto) {
+        Long userId = UserHolder.getUser().getId();
+        // 用户级限流：60秒内最多3次退款申请，防止恶意刷接口
+        rateLimitService.tryAcquire("order_refund", String.valueOf(userId), 3, 60);
+        log.info("[User] 申请退款 userId={} orderId={}", userId, id);
+        orderService.userApplyRefund(userId, id, dto.getReason());
+        return Result.ok();
+    }
 }

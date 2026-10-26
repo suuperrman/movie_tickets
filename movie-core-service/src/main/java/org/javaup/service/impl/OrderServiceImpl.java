@@ -379,6 +379,29 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         log.info("支付成功 orderNo={}", order.getOrderNo());
     }
 
+    // ==================== 用户端 5.5 申请退款（已支付→退款中） ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void userApplyRefund(Long userId, Long orderId, String reason) {
+        Order order = getById(orderId);
+        if (order == null) throw new MovieFrameException("订单不存在");
+        if (!order.getUserId().equals(userId)) throw new MovieFrameException("无权操作");
+
+        // 幂等：重复申请直接提示，不产生副作用
+        if (order.getStatus() == 3) throw new MovieFrameException("退款申请已提交，请耐心等待审核");
+        if (order.getStatus() != 1) throw new MovieFrameException("仅已支付订单可以申请退款");
+
+        Date now = new Date();
+        order.setStatus(3);
+        order.setRefundReason(cn.hutool.core.util.StrUtil.trimToEmpty(reason));
+        order.setRefundApplyAt(now);
+        order.setUpdatedAt(now);
+        updateById(order);
+
+        log.info("[用户申请退款] orderNo={} userId={} reason={}", order.getOrderNo(), userId, reason);
+    }
+
     // ==================== 管理端 6. 分页查询 ====================
 
     @Override
@@ -419,7 +442,10 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     public void adminRefund(Long orderId, String reason) {
         Order order = getById(orderId);
         if (order == null) throw new MovieFrameException("订单不存在");
-        if (order.getStatus() != 1) throw new MovieFrameException("仅已支付订单可以退款");
+        // 允许两种入口：已支付(1) 管理员主动退款；退款中(3) 审核同意用户申请
+        if (order.getStatus() != 1 && order.getStatus() != 3) {
+            throw new MovieFrameException("仅已支付或退款中的订单可以退款");
+        }
 
         // 已售→可售（2→0）
         List<OrderItem> items = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId));
@@ -433,15 +459,48 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 .eq(Schedule::getId, order.getScheduleId())
                 .setSql("available_seat = available_seat + " + items.size()));
 
+        Date now = new Date();
         order.setStatus(4);
-        order.setCancelTime(new Date());
-        order.setUpdatedAt(new Date());
+        order.setCancelTime(now);
+        order.setRefundAuditAt(now);
+        if (cn.hutool.core.util.StrUtil.isNotBlank(reason)) {
+            order.setRefundReason(reason);
+        }
+        order.setUpdatedAt(now);
         updateById(order);
 
         // ★ 退款后座位从已售→可售，必须清缓存（旧代码漏掉了！）
         evictSeatMapCache(order.getScheduleId());
 
         log.info("管理端退款 orderNo={} reason={}", order.getOrderNo(), reason);
+    }
+
+    // ==================== 管理端 9. 退款审核 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void adminAuditRefund(Long orderId, Boolean approve, String reason) {
+        Order order = getById(orderId);
+        if (order == null) throw new MovieFrameException("订单不存在");
+        if (order.getStatus() != 3) throw new MovieFrameException("仅退款中的订单可以审核");
+
+        if (Boolean.TRUE.equals(approve)) {
+            // 同意退款：复用退款逻辑（释放座位 + 状态→已退款）
+            adminRefund(orderId, reason);
+            return;
+        }
+
+        // 拒绝退款：退款中(3) → 已支付(1)，记录审核时间与拒绝原因
+        Date now = new Date();
+        order.setStatus(1);
+        order.setRefundAuditAt(now);
+        if (cn.hutool.core.util.StrUtil.isNotBlank(reason)) {
+            order.setRefundReason(reason);
+        }
+        order.setUpdatedAt(now);
+        updateById(order);
+
+        log.info("[管理端] 拒绝退款 orderNo={} reason={}", order.getOrderNo(), reason);
     }
 
     // ==================== 内部辅助 ====================
@@ -492,6 +551,7 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
 
         return UserOrderListVO.builder()
                 .id(order.getId()).orderNo(order.getOrderNo()).status(order.getStatus())
+                .movieId(order.getMovieId())
                 .movieName(movie != null ? movie.getName() : "")
                 .moviePoster(movie != null ? movie.getPosterUrl() : "")
                 .cinemaName(cinema != null ? cinema.getName() : "")
@@ -533,6 +593,9 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 .expireAt(format(order.getExpireAt()))
                 .payTime(format(order.getPayTime()))
                 .cancelTime(format(order.getCancelTime()))
+                .refundReason(order.getRefundReason())
+                .refundApplyAt(format(order.getRefundApplyAt()))
+                .refundAuditAt(format(order.getRefundAuditAt()))
                 .createdAt(format(order.getCreatedAt()))
                 .items(items.stream().map(i -> OrderDetailVO.OrderItemVO.builder()
                         .seatCode(i.getSeatCode()).rowNo(i.getRowNo()).colNo(i.getColNo()).price(i.getPrice())

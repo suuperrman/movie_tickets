@@ -16,6 +16,7 @@ import org.javaup.mapper.SysUserMapper;
 import org.javaup.service.AuthService;
 import org.javaup.utils.CaptchaGenerator;
 import org.javaup.utils.JwtUtils;
+import org.javaup.utils.MaskUtil;
 import org.javaup.utils.RequestContextUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -484,7 +485,7 @@ public class AuthServiceImpl implements AuthService {
 
     private UserInfoVO buildUserInfoVO(SysUser user) {
         return UserInfoVO.builder()
-                .id(user.getId()).phone(user.getPhone())
+                .id(user.getId()).phone(MaskUtil.maskPhone(user.getPhone()))
                 .nickname(user.getNickname()).avatar(user.getAvatar())
                 .role(user.getRole())
                 .build();

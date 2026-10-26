@@ -41,6 +41,12 @@ public class OrderDetailVO {
     private String expireAt;
     private String payTime;
     private String cancelTime;
+    /** 退款原因（用户申请或管理员审核填写） */
+    private String refundReason;
+    /** 退款申请时间 */
+    private String refundApplyAt;
+    /** 退款审核时间 */
+    private String refundAuditAt;
     private String createdAt;
     private List<OrderItemVO> items;
 

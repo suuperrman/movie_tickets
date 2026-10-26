@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.javaup.dto.movie.*;
+import org.javaup.dto.review.MovieRatingVO;
 import org.javaup.entity.*;
 import org.javaup.enums.BaseCode;
 import org.javaup.exception.MovieFrameException;
@@ -16,7 +17,9 @@ import org.javaup.core.RedisKeyManage;
 import org.javaup.redis.RedisCache;
 import org.javaup.redis.RedisKeyBuild;
 import org.javaup.service.BloomFilterService;
+import org.javaup.service.MovieReviewService;
 import org.javaup.service.MovieService;
+import org.javaup.service.MultiLevelCacheService;
 import org.javaup.utils.MovieCacheEvictHelper;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -55,6 +58,8 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     private final StringRedisTemplate stringRedisTemplate;
     private final MovieCacheEvictHelper cacheEvictHelper;
     private final BloomFilterService bloomFilterService;
+    private final MultiLevelCacheService multiLevelCacheService;
+    private final MovieReviewService movieReviewService;
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final DateTimeFormatter DATE_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
@@ -249,11 +254,12 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
             return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), query.getCity());
         };
         try {
-            return redisCache.getWithMutex(key,
+            // 多级缓存：Caffeine本地缓存 → Redis → DB
+            return multiLevelCacheService.get(key,
                     new com.alibaba.fastjson.TypeReference<Page<MovieListItemVO>>(){}.getType(),
                     dbFallback, 5, TimeUnit.MINUTES);
         } catch (Exception e) {
-            log.warn("[缓存互斥锁查询失败，降级直查DB] nowShowing: {}", e.getMessage());
+            log.warn("[多级缓存查询失败，降级直查DB] nowShowing: {}", e.getMessage());
             return dbFallback.get();
         }
     }
@@ -273,11 +279,12 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
             return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), query.getCity());
         };
         try {
-            return redisCache.getWithMutex(key,
+            // 多级缓存：Caffeine本地缓存 → Redis → DB
+            return multiLevelCacheService.get(key,
                     new com.alibaba.fastjson.TypeReference<Page<MovieListItemVO>>(){}.getType(),
                     dbFallback, 5, TimeUnit.MINUTES);
         } catch (Exception e) {
-            log.warn("[缓存互斥锁查询失败，降级直查DB] comingSoon: {}", e.getMessage());
+            log.warn("[多级缓存查询失败，降级直查DB] comingSoon: {}", e.getMessage());
             return dbFallback.get();
         }
     }
@@ -299,9 +306,10 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
             return buildDetail(movie, false);
         };
         try {
-            return redisCache.getWithMutex(key, MovieDetailVO.class, dbFallback, 30, TimeUnit.MINUTES);
+            // 多级缓存：Caffeine本地缓存 → Redis → DB
+            return multiLevelCacheService.get(key, MovieDetailVO.class, dbFallback, 30, TimeUnit.MINUTES);
         } catch (Exception e) {
-            log.warn("[缓存互斥锁查询失败，降级直查DB] movieDetailUser id={}: {}", id, e.getMessage());
+            log.warn("[多级缓存查询失败，降级直查DB] movieDetailUser id={}: {}", id, e.getMessage());
             return dbFallback.get();
         }
     }
@@ -337,11 +345,12 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
             return buildUserPage(wrapper, query.getPageNo(), query.getPageSize(), null);
         };
         try {
-            return redisCache.getWithMutex(key,
+            // 多级缓存：Caffeine本地缓存 → Redis → DB
+            return multiLevelCacheService.get(key,
                     new com.alibaba.fastjson.TypeReference<Page<MovieListItemVO>>(){}.getType(),
                     dbFallback, 3, TimeUnit.MINUTES);
         } catch (Exception e) {
-            log.warn("[缓存互斥锁查询失败，降级直查DB] search: {}", e.getMessage());
+            log.warn("[多级缓存查询失败，降级直查DB] search: {}", e.getMessage());
             return dbFallback.get();
         }
     }
@@ -697,14 +706,18 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         Map<Long, BigDecimal> minPriceMap = loadMinPrice(movieIds);
         Map<Long, Integer> cinemaCountMap = loadCinemaCount(movieIds);
         Map<Long, Integer> scheduleCountMap = loadScheduleCount(movieIds);
+        Map<Long, MovieRatingVO> ratingMap = movieReviewService.batchRatings(movieIds);
 
         voPage.setRecords(entityPage.getRecords().stream().map(m -> {
+            MovieRatingVO rating = ratingMap.getOrDefault(m.getId(), MovieRatingVO.empty());
             MovieListItemVO vo = MovieListItemVO.builder()
                     .id(m.getId()).name(m.getName()).director(m.getDirector())
                     .duration(m.getDuration()).posterUrl(m.getPosterUrl())
                     .status(m.getStatus()).description(m.getDescription())
                     .releaseDate(formatDate(m.getReleaseDate()))
                     .categories(categoryNamesMap.getOrDefault(m.getId(), ""))
+                    .avgRating(rating.getAvgRating())
+                    .reviewCount(rating.getReviewCount())
                     .build();
             if (forUser) {
                 vo.setMinPrice(minPriceMap.get(m.getId()));
@@ -751,8 +764,11 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         Map<Long, String> categoryNamesMap = loadCategoryNames(movieIds);
         Map<Long, BigDecimal> minPriceMap = loadMinPrice(movieIds);
         Map<Long, Integer> cinemaCountMap = loadCinemaCount(movieIds);
+        Map<Long, MovieRatingVO> ratingMap = movieReviewService.batchRatings(movieIds);
 
-        voPage.setRecords(entityPage.getRecords().stream().map(m -> MovieListItemVO.builder()
+        voPage.setRecords(entityPage.getRecords().stream().map(m -> {
+            MovieRatingVO rating = ratingMap.getOrDefault(m.getId(), MovieRatingVO.empty());
+            return MovieListItemVO.builder()
                 .id(m.getId()).name(m.getName()).director(m.getDirector())
                 .duration(m.getDuration()).posterUrl(m.getPosterUrl())
                 .status(m.getStatus())
@@ -760,7 +776,10 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                 .categories(categoryNamesMap.getOrDefault(m.getId(), ""))
                 .minPrice(minPriceMap.get(m.getId()))
                 .cinemaCount(cinemaCountMap.getOrDefault(m.getId(), 0))
-                .build()).collect(Collectors.toList()));
+                .avgRating(rating.getAvgRating())
+                .reviewCount(rating.getReviewCount())
+                .build();
+        }).collect(Collectors.toList()));
         return voPage;
     }
 
@@ -798,12 +817,14 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
             }).collect(Collectors.toList());
         }
 
+        MovieRatingVO rating = movieReviewService.movieRating(movie.getId());
         MovieDetailVO.MovieDetailVOBuilder builder = MovieDetailVO.builder()
                 .id(movie.getId()).name(movie.getName()).director(movie.getDirector())
                 .duration(movie.getDuration()).releaseDate(formatDate(movie.getReleaseDate()))
                 .posterUrl(movie.getPosterUrl()).description(movie.getDescription())
                 .status(movie.getStatus())
-                .categories(categories).actors(actors);
+                .categories(categories).actors(actors)
+                .avgRating(rating.getAvgRating()).reviewCount(rating.getReviewCount());
 
         if (!forAdmin) {
             builder.minPrice(loadMinPriceSingle(movie.getId())).cinemaCount(loadCinemaCountSingle(movie.getId()));

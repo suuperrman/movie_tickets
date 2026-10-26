@@ -1,6 +1,7 @@
 package org.javaup.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.javaup.dto.Result;
@@ -42,6 +43,13 @@ public class AdminOrderController {
         String reason = body != null ? body.getOrDefault("reason", "") : "";
         log.info("[Admin] 退款 orderId={} reason={}", id, reason);
         orderService.adminRefund(id, reason);
+        return Result.ok();
+    }
+
+    @PostMapping("/{id}/refund/audit")
+    public Result<Void> auditRefund(@PathVariable("id") Long id, @Valid @RequestBody RefundAuditDTO dto) {
+        log.info("[Admin] 退款审核 orderId={} approve={}", id, dto.getApprove());
+        orderService.adminAuditRefund(id, dto.getApprove(), dto.getReason());
         return Result.ok();
     }
 }

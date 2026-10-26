@@ -5,6 +5,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.javaup.dto.Result;
 import org.javaup.dto.movie.*;
+import org.javaup.dto.review.ReviewVO;
+import org.javaup.service.MovieReviewService;
 import org.javaup.service.MovieService;
 import org.javaup.service.RateLimitService;
 import org.javaup.utils.RequestContextUtils;
@@ -22,6 +24,7 @@ import java.util.List;
 public class MovieController {
 
     private final MovieService movieService;
+    private final MovieReviewService movieReviewService;
     private final RateLimitService rateLimitService;
 
     // ==================== 正在热映 ====================
@@ -83,5 +86,16 @@ public class MovieController {
         rateLimitService.tryAcquire("seat_map", clientIp != null ? clientIp : "unknown", 50, 1);
         log.info("[公开] GET /movie/schedule/{}/seats", scheduleId);
         return Result.ok(movieService.seatMap(scheduleId));
+    }
+
+    // ==================== 14. 电影评价列表（公开，仅展示已通过审核） ====================
+
+    @GetMapping("/{id:\\d+}/reviews")
+    public Result<Page<ReviewVO>> reviews(
+            @PathVariable("id") Long id,
+            @RequestParam(defaultValue = "1") Integer pageNo,
+            @RequestParam(defaultValue = "10") Integer pageSize) {
+        log.info("[公开] GET /movie/{}/reviews pageNo={} pageSize={}", id, pageNo, pageSize);
+        return Result.ok(movieReviewService.pageByMovie(id, pageNo, pageSize));
     }
 }

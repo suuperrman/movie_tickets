@@ -28,4 +28,8 @@ public class MovieListItemVO {
     private Integer cinemaCount;
     /** 排片数量（管理端使用） */
     private Integer scheduleCount;
+    /** 平均评分（1 位小数），无评价时为 null */
+    private java.math.BigDecimal avgRating;
+    /** 已通过审核的评价数量 */
+    private Integer reviewCount;
 }

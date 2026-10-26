@@ -88,6 +88,21 @@ public class Order implements Serializable {
     private Date cancelTime;
 
     /**
+     * 退款原因（用户申请或管理员填写）
+     */
+    private String refundReason;
+
+    /**
+     * 退款申请时间
+     */
+    private Date refundApplyAt;
+
+    /**
+     * 退款审核时间
+     */
+    private Date refundAuditAt;
+
+    /**
      * 创建时间
      */
     private Date createdAt;

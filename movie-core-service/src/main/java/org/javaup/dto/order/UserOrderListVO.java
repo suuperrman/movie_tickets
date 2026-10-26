@@ -19,6 +19,8 @@ public class UserOrderListVO {
     private String orderNo;
     /** 0待支付 1已支付 2已取消 3退款中 4已退款 5已完成 */
     private Integer status;
+    /** 电影ID（用于从订单页发起评价） */
+    private Long movieId;
     private String movieName;
     private String moviePoster;
     private String cinemaName;

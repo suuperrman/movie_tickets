@@ -31,6 +31,10 @@ public class MovieDetailVO {
     private Integer cinemaCount;
     /** 场次列表（管理端详情） */
     private List<ScheduleItem> schedules;
+    /** 平均评分（1 位小数），无评价时为 null */
+    private java.math.BigDecimal avgRating;
+    /** 已通过审核的评价数量 */
+    private Integer reviewCount;
 
     @Data
     @Builder

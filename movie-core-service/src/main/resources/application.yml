@@ -43,30 +43,28 @@ spring:
     date-format: yyyy-MM-dd HH:mm:ss
     generator:
       WRITE_NUMBERS_AS_STRINGS: true
-#  kafka:
-#    bootstrap-servers: 192.168.150.101:9092
-#    producer:
-#      acks: all
-#      retries: 5
-#      key-serializer: org.apache.kafka.common.serialization.StringSerializer
-#      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-#      properties:
-#        enable.idempotence: true
-#        max.in.flight.requests.per.connection: 5
-#    consumer:
-#      #默认的消费组ID
-#      group-id: create_voucher_order
-#      #是否自动提交offset
-#      enable-auto-commit: false
-#      # 当kafka中没有初始offset或offset超出范围时将自动重置offset
-#      # earliest:重置为分区中最小的offset;
-#      # latest:重置为分区中最新的offset(消费分区中新产生的数据);
-#      # none:只要有一个分区不存在已提交的offset,就抛出异常;
-#      auto-offset-reset: latest
-#      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-#      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-#    listener:
-#      ack-mode: manual_immediate
+  kafka:
+    # Kafka 地址（可用环境变量覆盖）
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:192.168.150.101:9092}
+    producer:
+      acks: all
+      retries: 5
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true
+    consumer:
+      # 秒杀下单消费组
+      group-id: seckill_voucher_order_group
+      # 手动提交由 ack-mode=record 控制
+      enable-auto-commit: false
+      # 没有初始 offset 时从最早的消息开始消费，避免遗漏下单消息
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      # 每条消息处理成功后提交 offset，配合唯一索引实现至少一次 + 幂等
+      ack-mode: record
 mybatis-plus:
   type-aliases-package: org.javaup.entity # 别名扫描包
   configuration:
@@ -84,12 +82,16 @@ bloom-filter:
       name: schedule-id-bloom
       expected-insertions: 100000
       false-probability: 0.01
+    phone:
+      name: phone-bloom
+      expected-insertions: 1000000
+      false-probability: 0.01
 # ========== 登录模块配置 ==========
 auth:
   # JWT 签名密钥（生产环境必须通过环境变量 AUTH_JWT_SECRET 注入！）
-  jwt-secret: ${AUTH_JWT_SECRET:movie-ticket-master-jwt-secret-key-256-bit-long-string-please-change}
+  jwt-secret: ${AUTH_JWT_SECRET}
   # Access Token 有效期（分钟）
-  access-token-expire-minutes: 30
+  access-token-expire-minutes: 5
   # Refresh Token 有效期（天）
   refresh-token-expire-days: 7
   # Refresh Token Cookie 名称
@@ -123,7 +125,7 @@ aliyun:
     # 最终对象 key = prefix + yyyy/MM/dd + 雪花ID + 原扩展名
     prefix: ""
     # 最大上传大小（MB）
-    max-size-mb: 10
+    max-size-mb: 3
 
 management:
   endpoints:
@@ -134,4 +136,12 @@ management:
     metrics:
       export:
         enabled: true
+
+# ========== 秒杀模块配置 ==========
+seckill:
+  kafka:
+    # 秒杀下单消息主题
+    order-topic: seckill_voucher_order_topic
+    # 消费组
+    order-group: seckill_voucher_order_group
       

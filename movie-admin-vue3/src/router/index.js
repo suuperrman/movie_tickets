@@ -26,6 +26,12 @@ const protectedRoutes = [
         component: () => import('@/views/dashboard/DashboardView.vue'),
         meta: { title: '仪表盘', icon: 'Odometer' },
       },
+      {
+        path: 'profile',
+        name: 'profile',
+        component: () => import('@/views/profile/ProfileView.vue'),
+        meta: { title: '个人中心', icon: 'User', hidden: true },
+      },
     ],
   },
   {

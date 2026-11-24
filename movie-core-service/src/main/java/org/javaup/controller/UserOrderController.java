@@ -36,7 +36,7 @@ public class UserOrderController {
         Long userId = UserHolder.getUser().getId();
         // 用户级限流：10秒内最多3次下单请求，防止恶意刷票
         rateLimitService.tryAcquire("order_create", String.valueOf(userId), 3, 10);
-        log.info("[User] 创建订单 userId={} scheduleId={} seatCount={}", userId, dto.getScheduleId(), dto.getSeatIds().size());
+        log.info("[User] 创建订单 userId={} scheduleId={} seatCount={}", userId, dto.getScheduleId(), dto.getSeats().size());
         return Result.ok(orderService.create(userId, dto));
     }
 

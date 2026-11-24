@@ -17,6 +17,7 @@ import org.javaup.redis.RedisKeyBuild;
 import org.javaup.service.BloomFilterService;
 import org.javaup.service.OrderService;
 import org.javaup.service.RateLimitService;
+import org.javaup.service.SeatStateService;
 import org.javaup.utils.MovieCacheEvictHelper;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -64,66 +65,19 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     private final StringRedisTemplate stringRedisTemplate;
     private final BloomFilterService bloomFilterService;
     private final MovieCacheEvictHelper cacheEvictHelper;
+    private final SeatStateService seatStateService;
 
     /** 座位锁定超时（毫秒）：15 分钟 */
     private static final long SEAT_LOCK_EXPIRE_MS = 15 * 60 * 1000L;
 
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-    /**
-     * 清除场次座位图缓存 —— 事务提交后再删！
-     *
-     * 旧实现（直接调 redisCache.del）有经典「先删缓存后提交事务」Race Condition：
-     *   UPDATE seat SET status=1  ← DB 写但还没 COMMIT
-     *   del(cache)                ← 先删！
-     *   ┌─ 并发 seatMap() → cache MISS → SELECT FROM DB（READ_COMMITTED）
-     *   │   → 读到 OLD status=0（事务没提交！）→ 把脏状态写回缓存！
-     *   │   → 新用户进来看到"可售" → 撞车！
-     *   └─ COMMIT                 ← 但缓存已经脏了！永久错误！
-     *
-     * 修复：注册 TransactionSynchronization.afterCommit() 回调
-     *   事务 COMMIT 后再 DEL cache → 并发 seatMap 进来要么 HIT（还没 DEL）
-     *   要么 MISS（DB 已提交）→ 两种情况都正确
-     *
-     * 兼容：非事务上下文（单测/手动调用）直接清
-     */
-    private void evictSeatMapCache(Long scheduleId) {
-        if (scheduleId == null) return;
-        String cacheKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId).getRelKey();
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            // 在 Spring @Transactional 里 → 注册提交后回调
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    doDelCache(cacheKey);
-                }
-            });
-        } else {
-            // 不在事务中 → 直接清
-            doDelCache(cacheKey);
-        }
-    }
-
-    /** 实际执行 Redis DEL（try-catch 吞掉异常，Redis 挂了不影响主流程） */
-    private void doDelCache(String cacheKey) {
+    /** 下单失败时释放幂等 key，避免用户 10 秒内无法重试 */
+    private void releaseIdempotentKey(String idempotentKey) {
         try {
-            stringRedisTemplate.delete(cacheKey);
-            log.info("[缓存失效] seatmap key={}", cacheKey);
+            stringRedisTemplate.delete(idempotentKey);
         } catch (Exception e) {
-            log.warn("[缓存失效失败] seatmap key={}: {}", cacheKey, e.getMessage());
-        }
-    }
-
-    /** 在 Redis ZSET 中投递锁定超时延时任务（score=到期毫秒时间戳） */
-    private void scheduleLockTimeout(Long scheduleId, String seatId, Long orderId, long expireMs) {
-        try {
-            String member = seatId + ":" + orderId;
-            double score = (double) expireMs;
-            RedisKeyBuild zsetKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_LOCK_ZSET, scheduleId);
-            redisCache.addForSortedSet(zsetKey, member, score);
-            log.debug("[锁座延时队列] scheduleId={} member={} expireAt={}", scheduleId, member, new Date(expireMs));
-        } catch (Exception e) {
-            log.warn("[锁座延时队列失败] scheduleId={}: {}", scheduleId, e.getMessage());
+            log.warn("[幂等key释放失败] key={}: {}", idempotentKey, e.getMessage());
         }
     }
 
@@ -133,139 +87,160 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
     @Transactional(rollbackFor = Exception.class)
     public Order create(Long userId, OrderCreateDTO dto) {
         // ===== 幂等防重：同一用户10秒内不能对同一场次相同座位重复下单 =====
-        String seatIdsHash = cn.hutool.core.util.StrUtil.join(",", dto.getSeatIds().stream().sorted().toArray());
+        String seatPosHash = dto.getSeats().stream()
+                .map(p -> p.getRowNo() + ":" + p.getColNo())
+                .sorted()
+                .collect(Collectors.joining(","));
         String idempotentKey = RedisKeyBuild.createRedisKey(RedisKeyManage.ORDER_CREATE_IDEMPOTENT_KEY,
-                userId, dto.getScheduleId(), cn.hutool.crypto.SecureUtil.md5(seatIdsHash)).getRelKey();
+                userId, dto.getScheduleId(), cn.hutool.crypto.SecureUtil.md5(seatPosHash)).getRelKey();
         Boolean acquired = stringRedisTemplate.opsForValue().setIfAbsent(idempotentKey, "1", 10, java.util.concurrent.TimeUnit.SECONDS);
         if (Boolean.FALSE.equals(acquired)) {
             throw new MovieFrameException("请勿重复提交订单");
         }
 
-        // ===== 布隆过滤器防穿透：场次ID不存在直接返回 =====
-        if (!bloomFilterService.containsScheduleId(dto.getScheduleId())) {
-            throw new MovieFrameException("场次不存在");
-        }
-
-        // ===== 座位图Redis前置过滤：缓存中座位已占用则快速失败，不查DB =====
-        try {
-            RedisKeyBuild seatMapKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, dto.getScheduleId());
-            org.javaup.dto.movie.SeatMapVO cachedSeatMap = redisCache.get(seatMapKey, org.javaup.dto.movie.SeatMapVO.class);
-            if (cachedSeatMap != null && cachedSeatMap.getSeatIds() != null && cachedSeatMap.getSeatStatusBitmap() != null) {
-                Map<Long, Integer> seatIndexMap = new HashMap<>();
-                for (int i = 0; i < cachedSeatMap.getSeatIds().size(); i++) {
-                    seatIndexMap.put(Long.valueOf(cachedSeatMap.getSeatIds().get(i)), i);
-                }
-                for (Long seatId : dto.getSeatIds()) {
-                    Integer idx = seatIndexMap.get(seatId);
-                    if (idx != null) {
-                        int status = org.javaup.utils.SeatBitmapUtil.getSeatStatus(cachedSeatMap.getSeatStatusBitmap(), idx);
-                        if (status != 0) {
-                            throw new MovieFrameException("座位已被占用，请刷新后重选");
-                        }
-                    }
-                }
-            }
-        } catch (MovieFrameException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("[座位图前置过滤失败，继续走DB校验] scheduleId={}: {}", dto.getScheduleId(), e.getMessage());
-        }
-
-        Schedule schedule = scheduleMapper.selectById(dto.getScheduleId());
-        if (schedule == null) throw new MovieFrameException("场次不存在");
-        if (schedule.getStatus() != 1) throw new MovieFrameException("该场次已停售");
-        // ★ 过期场次也不允许下单（防手改 URL 绕过）
-        if (schedule.getEndTime() != null && schedule.getEndTime().before(new java.util.Date())) {
-            throw new MovieFrameException("场次已结束，无法购票");
-        }
-        if (dto.getSeatIds().size() > schedule.getAvailableSeat()) {
-            throw new MovieFrameException("可选座位不足");
-        }
-
-        // 查询所选座位，必须全部可售
-        List<ScheduleSeat> seats = scheduleSeatMapper.selectBatchIds(dto.getSeatIds());
-        if (seats.size() != dto.getSeatIds().size()) {
-            throw new MovieFrameException("部分座位不存在");
-        }
-
-        // 批量从物理座位表拿 seatCode（非持久化字段，用于日志和 order_item 明细）
-        List<Long> seatIds = seats.stream().map(ScheduleSeat::getSeatId).distinct().collect(Collectors.toList());
-        Map<Long, String> seatCodeMap = seatMapper.selectBatchIds(seatIds).stream()
-                .collect(Collectors.toMap(Seat::getId, Seat::getSeatCode));
-        seats.forEach(s -> s.setSeatCode(seatCodeMap.getOrDefault(s.getSeatId(), "")));
-
-        for (ScheduleSeat seat : seats) {
-            if (!seat.getScheduleId().equals(dto.getScheduleId())) {
-                throw new MovieFrameException("部分座位不属于该场次");
-            }
-            if (seat.getStatus() != 0) {
-                throw new MovieFrameException("座位 " + seat.getSeatCode() + " 已被占用");
-            }
-        }
-
-        // 一次性锁座（乐观锁校验 status=0）
+        Long scheduleId = dto.getScheduleId();
+        // ★ 先分配 orderId：座位状态 HASH 里要以订单 id 作为锁归属，便于支付/取消/退款校验
+        Long orderId = IdUtil.getSnowflakeNextId();
+        long expireMs = System.currentTimeMillis() + SEAT_LOCK_EXPIRE_MS;
+        Date expireDate = new Date(expireMs);
         Date now = new Date();
-        for (ScheduleSeat seat : seats) {
+        List<Long> seatIds = new ArrayList<>();
+        boolean reserved = false;
+        Order order;
+
+        try {
+            // ===== 布隆过滤器防穿透：场次ID不存在直接返回 =====
+            if (!bloomFilterService.containsScheduleId(scheduleId)) {
+                throw new MovieFrameException("场次不存在");
+            }
+
+            Schedule schedule = scheduleMapper.selectById(scheduleId);
+            if (schedule == null) throw new MovieFrameException("场次不存在");
+            if (schedule.getStatus() != 1) throw new MovieFrameException("该场次已停售");
+            // ★ 过期场次也不允许下单（防手改 URL 绕过）
+            if (schedule.getEndTime() != null && schedule.getEndTime().before(now)) {
+                throw new MovieFrameException("场次已结束，无法购票");
+            }
+            if (dto.getSeats().size() > schedule.getAvailableSeat()) {
+                throw new MovieFrameException("可选座位不足");
+            }
+
+            // ===== 行列 → schedule_seat：前端不再传座位 ID，按场次内唯一的行列定位 =====
+            Set<String> wanted = new LinkedHashSet<>();
+            for (OrderCreateDTO.SeatPosition pos : dto.getSeats()) {
+                if (!wanted.add(pos.getRowNo() + ":" + pos.getColNo())) {
+                    throw new MovieFrameException("座位重复，请刷新后重选");
+                }
+            }
+            Set<Integer> rowNos = dto.getSeats().stream()
+                    .map(OrderCreateDTO.SeatPosition::getRowNo).collect(Collectors.toSet());
+            Set<Integer> colNos = dto.getSeats().stream()
+                    .map(OrderCreateDTO.SeatPosition::getColNo).collect(Collectors.toSet());
+            Map<String, ScheduleSeat> seatByPos = scheduleSeatMapper.selectList(
+                            new LambdaQueryWrapper<ScheduleSeat>()
+                                    .eq(ScheduleSeat::getScheduleId, scheduleId)
+                                    .in(ScheduleSeat::getRowNo, rowNos)
+                                    .in(ScheduleSeat::getColNo, colNos))
+                    .stream()
+                    .collect(Collectors.toMap(s -> s.getRowNo() + ":" + s.getColNo(), s -> s, (a, b) -> a));
+
+            List<ScheduleSeat> seats = new ArrayList<>(wanted.size());
+            for (OrderCreateDTO.SeatPosition pos : dto.getSeats()) {
+                ScheduleSeat seat = seatByPos.get(pos.getRowNo() + ":" + pos.getColNo());
+                if (seat == null) {
+                    throw new MovieFrameException("部分座位不存在");
+                }
+                seats.add(seat);
+            }
+            // schedule_seat.id 才是状态 HASH 的 field，后续锁座/明细仍以 ID 为准
+            seatIds = seats.stream().map(ScheduleSeat::getId).collect(Collectors.toList());
+
+            // 批量从物理座位表拿 seatCode（非持久化字段，用于日志和 order_item 明细）
+            Map<Long, String> seatCodeMap = seatMapper.selectBatchIds(
+                            seats.stream().map(ScheduleSeat::getSeatId).distinct().collect(Collectors.toList()))
+                    .stream().collect(Collectors.toMap(Seat::getId, Seat::getSeatCode));
+            seats.forEach(s -> s.setSeatCode(seatCodeMap.getOrDefault(s.getSeatId(), "")));
+
+            BigDecimal totalAmount = seats.stream().map(ScheduleSeat::getPrice).reduce(BigDecimal.ZERO, BigDecimal::add);
+
+            order = new Order();
+            order.setId(orderId);
+            order.setOrderNo(generateOrderNo());
+            order.setUserId(userId);
+            order.setScheduleId(scheduleId);
+            order.setMovieId(schedule.getMovieId());
+            order.setCinemaId(schedule.getCinemaId());
+            order.setSeatCount(seats.size());
+            order.setTotalAmount(totalAmount);
+            order.setDiscount(BigDecimal.ZERO);
+            order.setPayAmount(totalAmount);
+            order.setStatus(0); // 待支付
+            order.setExpireAt(expireDate);
+            order.setCreatedAt(now);
+            order.setUpdatedAt(now);
+
+            // ① Redis HASH 原子锁座（并发抢座的第一道闸，All-or-Nothing）
+            long reserveResult = seatStateService.reserve(scheduleId, seatIds, orderId, expireMs);
+            if (reserveResult > 0) {
+                throw new MovieFrameException("座位已被占用，请刷新后重选");
+            }
+            if (reserveResult != 0) {
+                throw new MovieFrameException("座位状态异常，请稍后重试");
+            }
+            reserved = true;
+
+            // ② DB 二次校验 + 单条批量 UPDATE（允许接管 lock_expire_at 已到期的旧锁，与 Lua 判定一致）
             int rows = scheduleSeatMapper.update(null, new LambdaUpdateWrapper<ScheduleSeat>()
-                    .eq(ScheduleSeat::getId, seat.getId())
-                    .eq(ScheduleSeat::getStatus, 0)
+                    .in(ScheduleSeat::getId, seatIds)
+                    .and(w -> w.eq(ScheduleSeat::getStatus, 0)
+                            .or(x -> x.eq(ScheduleSeat::getStatus, 1).le(ScheduleSeat::getLockExpireAt, now)))
                     .set(ScheduleSeat::getStatus, 1)
                     .set(ScheduleSeat::getLockUserId, userId)
-                    .set(ScheduleSeat::getLockExpireAt, Date.from(LocalDateTime.now().plusMinutes(15).atZone(ZoneId.systemDefault()).toInstant())));
-            if (rows == 0) {
-                throw new MovieFrameException("座位 " + seat.getSeatCode() + " 抢购失败，请重试");
+                    .set(ScheduleSeat::getLockExpireAt, expireDate)
+                    .set(ScheduleSeat::getOrderId, orderId));
+            if (rows != seatIds.size()) {
+                throw new MovieFrameException("座位抢购失败，请重试");
             }
+
+            // ③ 订单 + 明细（明细单条 SQL 批量插入，避免 N 次 INSERT 往返）
+            save(order);
+            List<OrderItem> items = new ArrayList<>(seats.size());
+            for (ScheduleSeat seat : seats) {
+                OrderItem item = new OrderItem();
+                item.setId(IdUtil.getSnowflakeNextId());
+                item.setOrderId(orderId);
+                item.setScheduleSeatId(seat.getId());
+                item.setSeatCode(seat.getSeatCode());
+                item.setRowNo(seat.getRowNo());
+                item.setColNo(seat.getColNo());
+                item.setPrice(seat.getPrice());
+                item.setCreatedAt(now);
+                items.add(item);
+            }
+            orderItemMapper.insertBatch(items);
+
+            // ④ 扣减可售座位
+            scheduleMapper.update(null, new LambdaUpdateWrapper<Schedule>()
+                    .eq(Schedule::getId, scheduleId)
+                    .setSql("available_seat = available_seat - " + seats.size()));
+        } catch (RuntimeException e) {
+            // DB 事务会回滚，但 Redis 状态迁移是事务外的，需要显式回滚已锁定的座位
+            if (reserved) {
+                try {
+                    seatStateService.release(scheduleId, seatIds, orderId, 1);
+                } catch (Exception ex) {
+                    log.warn("[下单失败回滚座位状态异常] scheduleId={} orderId={}: {}", scheduleId, orderId, ex.getMessage());
+                }
+            }
+            releaseIdempotentKey(idempotentKey);
+            throw e;
         }
 
-        // 计算总额
-        BigDecimal totalAmount = seats.stream().map(ScheduleSeat::getPrice).reduce(BigDecimal.ZERO, BigDecimal::add);
+        // ⑤ 事务提交后再投递延时任务（事务回滚则不会投递）
+        seatStateService.scheduleTimeoutAfterCommit(scheduleId, seatIds, orderId, expireMs);
 
-        // 创建订单
-        Order order = new Order();
-        order.setId(IdUtil.getSnowflakeNextId());
-        order.setOrderNo(generateOrderNo());
-        order.setUserId(userId);
-        order.setScheduleId(dto.getScheduleId());
-        order.setMovieId(schedule.getMovieId());
-        order.setCinemaId(schedule.getCinemaId());
-        order.setSeatCount(seats.size());
-        order.setTotalAmount(totalAmount);
-        order.setDiscount(BigDecimal.ZERO);
-        order.setPayAmount(totalAmount);
-        order.setStatus(0); // 待支付
-        order.setExpireAt(Date.from(LocalDateTime.now().plusMinutes(15).atZone(ZoneId.systemDefault()).toInstant()));
-        order.setCreatedAt(now);
-        order.setUpdatedAt(now);
-        save(order);
-
-        // 批量插入 order_item
-        for (ScheduleSeat seat : seats) {
-            OrderItem item = new OrderItem();
-            item.setOrderId(order.getId());
-            item.setScheduleSeatId(seat.getId());
-            item.setSeatCode(seat.getSeatCode());
-            item.setRowNo(seat.getRowNo());
-            item.setColNo(seat.getColNo());
-            item.setPrice(seat.getPrice());
-            item.setCreatedAt(now);
-            orderItemMapper.insert(item);
-        }
-
-        // 更新 schedule.availableSeat
-        scheduleMapper.update(null, new LambdaUpdateWrapper<Schedule>()
-                .eq(Schedule::getId, dto.getScheduleId())
-                .setSql("available_seat = available_seat - " + seats.size()));
-
-        // ★ 清除座位图缓存（订单操作必失效）
-        evictSeatMapCache(dto.getScheduleId());
-
-        // ★ Redis ZSET 投递 15 分钟后自动释放的延时任务
-        long expireMs = System.currentTimeMillis() + SEAT_LOCK_EXPIRE_MS;
-        for (ScheduleSeat seat : seats) {
-            scheduleLockTimeout(dto.getScheduleId(), String.valueOf(seat.getId()), order.getId(), expireMs);
-        }
-
-        log.info("创建订单 orderNo={} userId={} scheduleId={} seatCount={}", order.getOrderNo(), userId, dto.getScheduleId(), seats.size());
+        log.info("创建订单 orderNo={} userId={} scheduleId={} seatCount={}",
+                order.getOrderNo(), userId, scheduleId, seatIds.size());
         return order;
     }
 
@@ -304,35 +279,42 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         if (!order.getUserId().equals(userId)) throw new MovieFrameException("无权操作");
         if (order.getStatus() != 0) throw new MovieFrameException("只有待支付订单可以取消");
 
-        // 释放锁座（1→0）
-        List<OrderItem> items = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId));
-        scheduleSeatMapper.update(null, new LambdaUpdateWrapper<ScheduleSeat>()
-                .in(ScheduleSeat::getId, items.stream().map(OrderItem::getScheduleSeatId).collect(Collectors.toList()))
+        Long scheduleId = order.getScheduleId();
+        List<Long> seatIds = orderItemMapper.selectList(
+                        new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId))
+                .stream().map(OrderItem::getScheduleSeatId).collect(Collectors.toList());
+
+        // ① Redis HASH 原子释放（1→0，校验锁归属；已被支付/自动解锁处理过则不动）
+        seatStateService.release(scheduleId, seatIds, orderId, 1);
+
+        // ② DB 乐观释放：只释放仍处于锁定中的座位
+        int rows = scheduleSeatMapper.update(null, new LambdaUpdateWrapper<ScheduleSeat>()
+                .in(ScheduleSeat::getId, seatIds)
                 .eq(ScheduleSeat::getStatus, 1)
+                .eq(ScheduleSeat::getOrderId, orderId)
                 .set(ScheduleSeat::getStatus, 0)
-                // ★ 修复：lockUserId/lockExpireAt 改为 0/NOT NULL 兼容
                 .set(ScheduleSeat::getLockUserId, 0L)
-                .set(ScheduleSeat::getLockExpireAt, new Date(0)));
+                .set(ScheduleSeat::getLockExpireAt, new Date(0))
+                .set(ScheduleSeat::getOrderId, 0L));
 
-        // 加回 availableSeat
-        scheduleMapper.update(null, new LambdaUpdateWrapper<Schedule>()
-                .eq(Schedule::getId, order.getScheduleId())
-                .setSql("available_seat = available_seat + " + items.size()));
+        // 按实际释放数加回 availableSeat，避免与自动解锁并发时重复加库存
+        if (rows > 0) {
+            scheduleMapper.update(null, new LambdaUpdateWrapper<Schedule>()
+                    .eq(Schedule::getId, scheduleId)
+                    .setSql("available_seat = available_seat + " + rows));
+        }
 
-        // 更新订单状态
-        order.setStatus(2);
-        order.setCancelTime(new Date());
-        order.setUpdatedAt(new Date());
-        updateById(order);
+        // ③ 订单状态按 0→2 条件更新（并发下若已支付/已取消则不覆盖）
+        Date now = new Date();
+        orderMapper.update(null, new LambdaUpdateWrapper<Order>()
+                .eq(Order::getId, orderId)
+                .eq(Order::getStatus, 0)
+                .set(Order::getStatus, 2)
+                .set(Order::getCancelTime, now)
+                .set(Order::getUpdatedAt, now));
 
-        // ★ 清除缓存 + 移除延时队列里的该订单条目（避免被自动解锁消费）
-        evictSeatMapCache(order.getScheduleId());
-        try {
-            RedisKeyBuild zsetKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_LOCK_ZSET, order.getScheduleId());
-            for (OrderItem item : items) {
-                redisCache.delForSortedSet(zsetKey, String.valueOf(item.getScheduleSeatId()) + ":" + order.getId());
-            }
-        } catch (Exception ignore) {}
+        // ④ 事务提交后移除全局延时队列中的该订单条目
+        seatStateService.cancelTimeoutAfterCommit(scheduleId, seatIds, orderId);
 
         log.info("用户取消订单 orderNo={}", order.getOrderNo());
     }
@@ -354,27 +336,52 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         if (order.getStatus() != 0) {
             throw new MovieFrameException("订单状态不允许支付");
         }
+        Date now = new Date();
+        if (order.getExpireAt() != null && order.getExpireAt().before(now)) {
+            throw new MovieFrameException("订单已超时，请重新下单");
+        }
 
-        // 锁定→已售（1→2）
-        List<OrderItem> items = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId));
-        scheduleSeatMapper.update(null, new LambdaUpdateWrapper<ScheduleSeat>()
-                .in(ScheduleSeat::getId, items.stream().map(OrderItem::getScheduleSeatId).collect(Collectors.toList()))
-                .eq(ScheduleSeat::getStatus, 1)
-                .set(ScheduleSeat::getStatus, 2));
+        Long scheduleId = order.getScheduleId();
+        List<Long> seatIds = orderItemMapper.selectList(
+                        new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId))
+                .stream().map(OrderItem::getScheduleSeatId).collect(Collectors.toList());
 
-        order.setStatus(1);
-        order.setPayTime(new Date());
-        order.setUpdatedAt(new Date());
-        updateById(order);
+        // ① Redis HASH 原子确认（1→2，校验锁归属；锁定已超时/被释放则失败）
+        long confirmResult = seatStateService.confirmSold(scheduleId, seatIds, orderId);
+        if (confirmResult != 0) {
+            throw new MovieFrameException("座位锁定已失效，请重新下单");
+        }
 
-        // ★ 清除缓存 + 移除延时队列条目（支付完成无需自动解锁）
-        evictSeatMapCache(order.getScheduleId());
-        try {
-            RedisKeyBuild zsetKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_LOCK_ZSET, order.getScheduleId());
-            for (OrderItem item : items) {
-                redisCache.delForSortedSet(zsetKey, String.valueOf(item.getScheduleSeatId()) + ":" + order.getId());
+        // ② 订单 0→1 条件更新（防与取消/自动解锁并发覆盖）
+        int orderRows = orderMapper.update(null, new LambdaUpdateWrapper<Order>()
+                .eq(Order::getId, orderId)
+                .eq(Order::getStatus, 0)
+                .set(Order::getStatus, 1)
+                .set(Order::getPayTime, now)
+                .set(Order::getUpdatedAt, now));
+        if (orderRows == 0) {
+            Order latest = getById(orderId);
+            if (latest != null && latest.getStatus() == 1) {
+                log.info("[支付并发幂等] 订单已被其他请求置为已支付 orderNo={}", order.getOrderNo());
+                return;
             }
-        } catch (Exception ignore) {}
+            seatStateService.release(scheduleId, seatIds, orderId, 2);
+            throw new MovieFrameException("订单状态已变化，请刷新后重试");
+        }
+
+        // ③ DB 锁定→已售（1→2）
+        int rows = scheduleSeatMapper.update(null, new LambdaUpdateWrapper<ScheduleSeat>()
+                .in(ScheduleSeat::getId, seatIds)
+                .eq(ScheduleSeat::getStatus, 1)
+                .eq(ScheduleSeat::getOrderId, orderId)
+                .set(ScheduleSeat::getStatus, 2));
+        if (rows != seatIds.size()) {
+            seatStateService.release(scheduleId, seatIds, orderId, 2);
+            throw new MovieFrameException("座位状态异常，请刷新后重试");
+        }
+
+        // ④ 事务提交后移除延时队列条目（支付完成无需自动解锁）
+        seatStateService.cancelTimeoutAfterCommit(scheduleId, seatIds, orderId);
 
         log.info("支付成功 orderNo={}", order.getOrderNo());
     }
@@ -448,16 +455,30 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
 
         // 已售→可售（2→0）
-        List<OrderItem> items = orderItemMapper.selectList(new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId));
-        scheduleSeatMapper.update(null, new LambdaUpdateWrapper<ScheduleSeat>()
-                .in(ScheduleSeat::getId, items.stream().map(OrderItem::getScheduleSeatId).collect(Collectors.toList()))
-                .eq(ScheduleSeat::getStatus, 2)
-                .set(ScheduleSeat::getStatus, 0));
+        Long scheduleId = order.getScheduleId();
+        List<Long> seatIds = orderItemMapper.selectList(
+                        new LambdaQueryWrapper<OrderItem>().eq(OrderItem::getOrderId, orderId))
+                .stream().map(OrderItem::getScheduleSeatId).collect(Collectors.toList());
 
-        // 加回 availableSeat
-        scheduleMapper.update(null, new LambdaUpdateWrapper<Schedule>()
-                .eq(Schedule::getId, order.getScheduleId())
-                .setSql("available_seat = available_seat + " + items.size()));
+        // ① Redis HASH 原子释放（2→0，校验锁归属）
+        seatStateService.release(scheduleId, seatIds, orderId, 2);
+
+        // ② DB 已售→可售（只释放仍为已售的座位）
+        int rows = scheduleSeatMapper.update(null, new LambdaUpdateWrapper<ScheduleSeat>()
+                .in(ScheduleSeat::getId, seatIds)
+                .eq(ScheduleSeat::getStatus, 2)
+                .eq(ScheduleSeat::getOrderId, orderId)
+                .set(ScheduleSeat::getStatus, 0)
+                .set(ScheduleSeat::getLockUserId, 0L)
+                .set(ScheduleSeat::getLockExpireAt, new Date(0))
+                .set(ScheduleSeat::getOrderId, 0L));
+
+        // 按实际释放数加回 availableSeat
+        if (rows > 0) {
+            scheduleMapper.update(null, new LambdaUpdateWrapper<Schedule>()
+                    .eq(Schedule::getId, scheduleId)
+                    .setSql("available_seat = available_seat + " + rows));
+        }
 
         Date now = new Date();
         order.setStatus(4);
@@ -468,9 +489,6 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
         }
         order.setUpdatedAt(now);
         updateById(order);
-
-        // ★ 退款后座位从已售→可售，必须清缓存（旧代码漏掉了！）
-        evictSeatMapCache(order.getScheduleId());
 
         log.info("管理端退款 orderNo={} reason={}", order.getOrderNo(), reason);
     }
@@ -584,7 +602,6 @@ public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements
                 .cinemaAddress(cinema != null ? cinema.getAddress() : "")
                 .hallId(schedule != null ? schedule.getHallId() : null)
                 .hallName(hall != null ? hall.getName() : "")
-                .hallType(hall != null ? hall.getType() : null)
                 .startTime(schedule != null ? format(schedule.getStartTime()) : "")
                 .endTime(schedule != null ? format(schedule.getEndTime()) : "")
                 .price(schedule != null ? schedule.getPrice() : null)

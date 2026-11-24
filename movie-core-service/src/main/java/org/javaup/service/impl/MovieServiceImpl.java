@@ -20,7 +20,9 @@ import org.javaup.service.BloomFilterService;
 import org.javaup.service.MovieReviewService;
 import org.javaup.service.MovieService;
 import org.javaup.service.MultiLevelCacheService;
+import org.javaup.service.SeatStateService;
 import org.javaup.utils.MovieCacheEvictHelper;
+import org.javaup.utils.SeatBitmapUtil;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -60,6 +62,7 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     private final BloomFilterService bloomFilterService;
     private final MultiLevelCacheService multiLevelCacheService;
     private final MovieReviewService movieReviewService;
+    private final SeatStateService seatStateService;
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd");
     private static final DateTimeFormatter DATE_TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
@@ -382,13 +385,13 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         Date dayStart = Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
         Date dayEnd = Date.from(date.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant());
 
-        // 查出该电影指定日期内所有场次（过滤已结束的）
+        // 查出该电影指定日期内所有场次（只保留尚未开场的）
         List<Schedule> sessions = scheduleMapper.selectList(new LambdaQueryWrapper<Schedule>()
                 .eq(Schedule::getMovieId, movieId)
                 .ge(Schedule::getStartTime, dayStart)
                 .lt(Schedule::getStartTime, dayEnd)
                 .eq(Schedule::getStatus, 1)
-                .gt(Schedule::getEndTime, new Date()));
+                .gt(Schedule::getStartTime, new Date()));
 
         if (sessions.isEmpty()) {
             try {
@@ -419,10 +422,13 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                     List<Schedule> list = e.getValue();
                     BigDecimal minPrice = list.stream().map(Schedule::getPrice)
                             .min(Comparator.naturalOrder()).orElse(null);
-                    String firstTime = list.stream().map(Schedule::getStartTime)
-                            .min(Comparator.naturalOrder())
-                            .map(t -> DATE_TIME_FMT.format(LocalDateTime.ofInstant(t.toInstant(), ZoneId.systemDefault())))
+                    Schedule first = list.stream()
+                            .min(Comparator.comparing(Schedule::getStartTime))
                             .orElse(null);
+                    String firstTime = first == null ? null
+                            : DATE_TIME_FMT.format(LocalDateTime.ofInstant(first.getStartTime().toInstant(), ZoneId.systemDefault()));
+                    String firstEndTime = first == null ? null
+                            : DATE_TIME_FMT.format(LocalDateTime.ofInstant(first.getEndTime().toInstant(), ZoneId.systemDefault()));
                     return CinemaScheduleVO.builder()
                             .cinemaId(cinema.getId())
                             .cinemaName(cinema.getName())
@@ -431,6 +437,7 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                             .phone(cinema.getPhone())
                             .minPrice(minPrice)
                             .firstScheduleTime(firstTime)
+                            .firstScheduleEndTime(firstEndTime)
                             .scheduleCount(list.size())
                             .build();
                 })
@@ -446,6 +453,54 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     }
 
     // ========== 用户端：12. 指定影院指定日期场次 ==========
+
+    @Override
+    public List<org.javaup.dto.cinema.CinemaMovieVO> moviesForCinema(Long cinemaId, String dateStr) {
+        LocalDate date = parseLocalDateOrToday(dateStr);
+        Date dayStart = Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
+        Date dayEnd = Date.from(date.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant());
+
+        // 只统计当日尚未开场的可售场次
+        List<Schedule> sessions = scheduleMapper.selectList(new LambdaQueryWrapper<Schedule>()
+                .eq(Schedule::getCinemaId, cinemaId)
+                .ge(Schedule::getStartTime, dayStart)
+                .lt(Schedule::getStartTime, dayEnd)
+                .eq(Schedule::getStatus, 1)
+                .gt(Schedule::getStartTime, new Date()));
+        if (sessions.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<Long, List<Schedule>> grouped = sessions.stream()
+                .collect(Collectors.groupingBy(Schedule::getMovieId));
+        Map<Long, Movie> movieMap = movieMapper.selectBatchIds(grouped.keySet()).stream()
+                .collect(Collectors.toMap(Movie::getId, m -> m));
+
+        List<org.javaup.dto.cinema.CinemaMovieVO> result = new ArrayList<>();
+        for (Map.Entry<Long, List<Schedule>> entry : grouped.entrySet()) {
+            Movie movie = movieMap.get(entry.getKey());
+            if (movie == null) {
+                continue;
+            }
+            BigDecimal minPrice = entry.getValue().stream()
+                    .map(Schedule::getPrice)
+                    .filter(Objects::nonNull)
+                    .min(BigDecimal::compareTo)
+                    .orElse(null);
+            result.add(org.javaup.dto.cinema.CinemaMovieVO.builder()
+                    .id(movie.getId())
+                    .name(movie.getName())
+                    .posterUrl(movie.getPosterUrl())
+                    .duration(movie.getDuration())
+                    .director(movie.getDirector())
+                    .minPrice(minPrice)
+                    .scheduleCount(entry.getValue().size())
+                    .build());
+        }
+        result.sort(Comparator.comparing(org.javaup.dto.cinema.CinemaMovieVO::getScheduleCount).reversed()
+                .thenComparing(org.javaup.dto.cinema.CinemaMovieVO::getName));
+        return result;
+    }
 
     @Override
     public List<ScheduleVO> schedulesForMovie(Long movieId, Long cinemaId, String dateStr) {
@@ -477,7 +532,7 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                 .ge(Schedule::getStartTime, dayStart)
                 .lt(Schedule::getStartTime, dayEnd)
                 .eq(Schedule::getStatus, 1)
-                .gt(Schedule::getEndTime, new Date())
+                .gt(Schedule::getStartTime, new Date())
                 .orderByAsc(Schedule::getStartTime));
 
         if (sessions.isEmpty()) {
@@ -498,7 +553,6 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                     .scheduleId(s.getId())
                     .hallId(s.getHallId())
                     .hallName(hall != null ? hall.getName() : "")
-                    .hallType(hall != null ? hall.getType() : 1)
                     .startTime(DATE_TIME_FMT.format(LocalDateTime.ofInstant(s.getStartTime().toInstant(), ZoneId.systemDefault())))
                     .endTime(DATE_TIME_FMT.format(LocalDateTime.ofInstant(s.getEndTime().toInstant(), ZoneId.systemDefault())))
                     .price(s.getPrice())
@@ -519,63 +573,93 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
     // ========== 用户端：13. 选座页面座位图 ==========
 
     @Override
-    @Transactional(readOnly = true)
     public SeatMapVO seatMap(Long scheduleId) {
         // 布隆过滤器防穿透：场次ID不存在直接返回
         if (!bloomFilterService.containsScheduleId(scheduleId)) {
             throw new MovieFrameException("场次不存在或已停售");
         }
-        // ★ 先校验场次有效性（不能只靠缓存！缓存命中也可能场次已过期）
-        Schedule schedule = scheduleMapper.selectById(scheduleId);
-        if (schedule == null || schedule.getStatus() != 1) {
-            throw new MovieFrameException("场次不存在或已停售");
+
+        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId);
+
+        // ★ 缓存优先：dbFallback 内只有一次 JOIN 查询（场次+影厅+影院+影片+座位），命中缓存则零 DB 查询
+        //   座位状态以 Redis HASH 为权威，读缓存后用 HASH 覆盖 Bitmap（见 overlayLiveSeatStates）
+        Supplier<SeatMapCacheVO> dbFallback = () -> doSeatMapQuery(scheduleId);
+
+        SeatMapCacheVO cached;
+        try {
+            // TTL 10 分钟：状态的实时变化靠 Redis HASH 覆盖，缓存只保存静态布局
+            cached = redisCache.getWithMutex(key, SeatMapCacheVO.class, dbFallback, 10, TimeUnit.MINUTES);
+        } catch (MovieFrameException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[缓存互斥锁查询失败，降级直查DB] seatmap scheduleId={}: {}", scheduleId, e.getMessage());
+            cached = dbFallback.get();
         }
-        if (schedule.getEndTime() != null && schedule.getEndTime().before(new Date())) {
-            // 过期场次 → 清掉残留缓存 + 报错
+
+        // 兼容旧缓存：裸 SeatMapVO 反序列化后 map 为空；旧版缓存载体没有 endTime，删掉重建
+        if (cached == null || cached.getMap() == null || cached.getEndTime() == null) {
+            redisCache.del(key);
+            cached = dbFallback.get();
+        }
+
+        SeatMapVO result = cached.getMap();
+
+        // ★ 用 Redis HASH 的实时座位状态覆盖 Bitmap（缓存只保留静态布局，状态以 HASH 为权威）
+        overlayLiveSeatStates(result, cached.getSeatIds(), scheduleId);
+
+        // 缓存命中也校验场次是否已结束（缓存最多残留 10 分钟），结束则清缓存并拒绝
+        if (isScheduleEnded(cached.getEndTime())) {
             try {
-                String cacheKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId).getRelKey();
-                stringRedisTemplate.delete(cacheKey);
+                stringRedisTemplate.delete(key.getRelKey());
             } catch (Exception ignored) {}
             throw new MovieFrameException("场次已结束，无法查看座位");
         }
+        // seatIds 只在服务端用于“实时状态覆盖 Bitmap”，客户端按行列下单，响应里不再返回
+        result.setSeatIds(null);
+        return result;
+    }
 
-        // ★ Redis 缓存：场次有效才查缓存（互斥锁防击穿）
-        RedisKeyBuild key = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_MAP_KEY, scheduleId);
-        Supplier<SeatMapVO> dbFallback = () -> doSeatMapQuery(scheduleId);
+    /**
+     * 缓存中的 endTime 形如 "yyyy-MM-dd HH:mm"，直接用它判断场次是否已结束，避免命中缓存还查一次 DB
+     */
+    private boolean isScheduleEnded(String endTime) {
+        if (StrUtil.isBlank(endTime)) {
+            return false;
+        }
         try {
-            return redisCache.getWithMutex(key, SeatMapVO.class, dbFallback, 100, TimeUnit.SECONDS);
+            return LocalDateTime.parse(endTime, DATE_TIME_FMT).isBefore(LocalDateTime.now());
         } catch (Exception e) {
-            log.warn("[缓存互斥锁查询失败，降级直查DB] seatmap scheduleId={}: {}", scheduleId, e.getMessage());
-            return dbFallback.get();
+            return false;
         }
     }
 
     /**
-     * 真实 DB 查询 + Bitmap 编码（被 seatMap 和其他需要绕开缓存的调用复用）
+     * 两条简单 SQL + Bitmap 编码。
+     *
+     * <p>1. 元信息：schedule JOIN hall/cinema/movie（恒 1 行）；
+     * 2. 座位：schedule_seat 按 schedule_id 查 4 列（走 uk_schedule_seat 索引前缀）。
+     * 相比原实现 5 次串行单表查询少了 3 次往返，也避免一条 JOIN 把元信息重复 N 份。</p>
      */
-    private SeatMapVO doSeatMapQuery(Long scheduleId) {
-        Schedule schedule = scheduleMapper.selectById(scheduleId);
-        if (schedule == null || schedule.getStatus() != 1) {
+    private SeatMapCacheVO doSeatMapQuery(Long scheduleId) {
+        SeatMapRow head = scheduleMapper.selectSeatMapMeta(scheduleId);
+        if (head == null) {
             throw new MovieFrameException("场次不存在或已停售");
         }
-        // ★ 过期场次也拒绝查询（防止用户手动改 URL 绕过）
-        if (schedule.getEndTime() != null && schedule.getEndTime().before(new Date())) {
+        if (head.getScheduleStatus() == null || head.getScheduleStatus() != 1) {
+            throw new MovieFrameException("场次不存在或已停售");
+        }
+        if (head.getEndTime() != null && head.getEndTime().before(new Date())) {
             throw new MovieFrameException("场次已结束，无法查看座位");
         }
-
-        Hall hall = hallMapper.selectById(schedule.getHallId());
-        if (hall == null) {
+        if (head.getRowCount() == null || head.getColCount() == null) {
             throw new MovieFrameException("影厅不存在");
         }
 
-        Cinema cinema = cinemaMapper.selectById(schedule.getCinemaId());
-        Movie movie = movieMapper.selectById(schedule.getMovieId());
-
-        int rowCount = hall.getRowCount();
-        int colCount = hall.getColCount();
+        int rowCount = head.getRowCount();
+        int colCount = head.getColCount();
         int totalSeats = rowCount * colCount;
 
-        // ★ SQL 投影查询：只 SELECT 四列（id/row_no/col_no/status），去掉 lock_user_id/order_id 等大字段
+        // 座位只取用到的四列，避免 lock_user_id/order_id 等无用字段
         List<ScheduleSeat> seats = scheduleSeatMapper.selectList(
                 new LambdaQueryWrapper<ScheduleSeat>()
                         .select(ScheduleSeat::getId, ScheduleSeat::getRowNo,
@@ -583,27 +667,33 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
                         .eq(ScheduleSeat::getScheduleId, scheduleId)
         );
 
-        // 构建扁平数组：index = rowNo*colCount + colNo（从 0 开始）
+        // 构建扁平数组：index = (rowNo-1) * colCount + (colNo-1)
         String[] seatIds = new String[totalSeats];
         int[] statusArr = new int[totalSeats];
 
         if (!seats.isEmpty()) {
-            for (ScheduleSeat s : seats) {
-                int idx = (s.getRowNo() - 1) * colCount + (s.getColNo() - 1);
-                seatIds[idx] = String.valueOf(s.getId());
-                statusArr[idx] = s.getStatus() != null ? s.getStatus() : 0;
+            for (ScheduleSeat seat : seats) {
+                int idx = (seat.getRowNo() - 1) * colCount + (seat.getColNo() - 1);
+                if (idx < 0 || idx >= totalSeats) {
+                    continue;
+                }
+                seatIds[idx] = String.valueOf(seat.getId());
+                statusArr[idx] = seat.getStatus() != null ? seat.getStatus() : 0;
             }
-            // 补全空洞（DB 缺座位）
+            // 补全空洞（DB 缺座位）：占位 ID 用 0，状态标记为 3（无此座位），前端不可选
             for (int i = 0; i < totalSeats; i++) {
-                if (seatIds[i] == null) { seatIds[i] = String.valueOf(0L); }
+                if (seatIds[i] == null) {
+                    seatIds[i] = String.valueOf(0L);
+                    statusArr[i] = 3;
+                }
             }
         } else {
-            // 虚拟生成：全可售，ID 用虚拟雪花（r*100000 + c）
+            // 虚拟生成：无真实座位数据时全部标记为不可售，避免用户选中后下单必然失败
             for (int r = 1; r <= rowCount; r++) {
                 for (int c = 1; c <= colCount; c++) {
                     int idx = (r - 1) * colCount + (c - 1);
                     seatIds[idx] = String.valueOf((long) r * 100000L + c);
-                    statusArr[idx] = 0;
+                    statusArr[idx] = 3;
                 }
             }
         }
@@ -613,9 +703,9 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         int byteLen = (totalSeats + 3) / 4; // 向上取整
         byte[] bitmap = new byte[byteLen];
         for (int i = 0; i < totalSeats; i++) {
-            // status 映射：0→00, 1→01, 2→10 （前端按 &0x03 解码）
+            // status 映射：0→00, 1→01, 2→10, 3→11（无此座位）（前端按 &0x03 解码）
             int s = statusArr[i];
-            if (s > 2) {
+            if (s > 3) {
                 s = 0; // 兜底
             }
             int byteIdx = i / 4;
@@ -625,25 +715,72 @@ public class MovieServiceImpl extends ServiceImpl<MovieMapper, Movie> implements
         String bitmapBase64 = java.util.Base64.getEncoder().encodeToString(bitmap);
 
         List<String> seatIdList = Arrays.asList(seatIds);
+        String endTime = formatDateTime(head.getEndTime());
 
-        return SeatMapVO.builder()
-                .scheduleId(schedule.getId())
-                .movieId(schedule.getMovieId())
-                .movieName(movie != null ? movie.getName() : "")
-                .posterUrl(movie != null ? movie.getPosterUrl() : null)
-                .cinemaId(schedule.getCinemaId())
-                .cinemaName(cinema != null ? cinema.getName() : "")
-                .hallId(hall.getId())
-                .hallName(hall.getName())
-                .hallType(hall.getType())
-                .startTime(DATE_TIME_FMT.format(LocalDateTime.ofInstant(schedule.getStartTime().toInstant(), ZoneId.systemDefault())))
-                .endTime(DATE_TIME_FMT.format(LocalDateTime.ofInstant(schedule.getEndTime().toInstant(), ZoneId.systemDefault())))
-                .price(schedule.getPrice())
+        SeatMapVO map = SeatMapVO.builder()
+                .movieName(head.getMovieName() != null ? head.getMovieName() : "")
+                .cinemaName(head.getCinemaName() != null ? head.getCinemaName() : "")
+                .hallName(head.getHallName() != null ? head.getHallName() : "")
+                .startTime(formatDateTime(head.getStartTime()))
+                .price(head.getPrice())
                 .rowCount(rowCount)
                 .colCount(colCount)
                 .seatIds(seatIdList)
                 .seatStatusBitmap(bitmapBase64)
                 .build();
+        return new SeatMapCacheVO(map, seatIdList, endTime);
+    }
+
+    /** Date → yyyy-MM-dd HH:mm */
+    private String formatDateTime(Date date) {
+        if (date == null) {
+            return null;
+        }
+        return DATE_TIME_FMT.format(LocalDateTime.ofInstant(date.toInstant(), ZoneId.systemDefault()));
+    }
+
+    /**
+     * 用 Redis HASH 的实时座位状态覆盖缓存中的 Bitmap。
+     *
+     * 座位图缓存只保证静态布局（seatIds/行列/场次信息）；锁定/已售状态随订单实时变化，
+     * 若每次变更都失效缓存会导致频繁回源 DB，这里改为读时覆盖，缓存 TTL 内可一直命中。
+     */
+    private void overlayLiveSeatStates(SeatMapVO map, List<String> seatIds, Long scheduleId) {
+        if (map == null || scheduleId == null) {
+            return;
+        }
+        String bitmapBase64 = map.getSeatStatusBitmap();
+        if (seatIds == null || seatIds.isEmpty() || bitmapBase64 == null || bitmapBase64.isEmpty()) {
+            return;
+        }
+        Map<String, Integer> states;
+        try {
+            states = seatStateService.getSeatStates(scheduleId);
+        } catch (Exception e) {
+            log.warn("[座位状态覆盖失败，沿用缓存状态] scheduleId={}: {}", scheduleId, e.getMessage());
+            return;
+        }
+        if (states.isEmpty()) {
+            return;
+        }
+        byte[] bitmap;
+        try {
+            bitmap = java.util.Base64.getDecoder().decode(bitmapBase64);
+        } catch (Exception e) {
+            log.warn("[座位Bitmap解码失败] scheduleId={}: {}", scheduleId, e.getMessage());
+            return;
+        }
+        int covered = 0;
+        for (int i = 0; i < seatIds.size(); i++) {
+            Integer status = states.get(seatIds.get(i));
+            if (status != null) {
+                SeatBitmapUtil.setSeatStatus(bitmap, i, status);
+                covered++;
+            }
+        }
+        if (covered > 0) {
+            map.setSeatStatusBitmap(java.util.Base64.getEncoder().encodeToString(bitmap));
+        }
     }
 
     // ==================== 内部工具方法 ====================

@@ -44,14 +44,6 @@ public class HallServiceImpl extends ServiceImpl<HallMapper, Hall> implements Ha
 
     private static final DateTimeFormatter FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
-    /** 影厅类型描述映射 */
-    private static final Map<Integer, String> HALL_TYPE_DESC = Map.of(
-            1, "普通厅",
-            2, "IMAX 厅",
-            3, "情侣厅",
-            4, "VIP 厅"
-    );
-
     // ==================== 1. 新增 ====================
 
     @Override
@@ -63,11 +55,9 @@ public class HallServiceImpl extends ServiceImpl<HallMapper, Hall> implements Ha
         Hall hall = new Hall();
         hall.setCinemaId(dto.getCinemaId());
         hall.setName(dto.getName());
-        hall.setType(dto.getType() != null ? dto.getType() : 1);
         // 默认 10×10（商家后续可通过批量生成座位添加更多行/列）
         hall.setRowCount(dto.getRowCount() != null ? dto.getRowCount() : 10);
         hall.setColCount(dto.getColCount() != null ? dto.getColCount() : 10);
-        hall.setLayout(dto.getLayout());
         hall.setCreatedAt(new Date());
         save(hall);
         log.info("新增影厅 id={} cinemaId={} name={}", hall.getId(), dto.getCinemaId(), dto.getName());
@@ -88,10 +78,8 @@ public class HallServiceImpl extends ServiceImpl<HallMapper, Hall> implements Ha
             hall.setCinemaId(dto.getCinemaId());
         }
         if (StrUtil.isNotBlank(dto.getName())) hall.setName(dto.getName());
-        if (dto.getType() != null) hall.setType(dto.getType());
         if (dto.getRowCount() != null) hall.setRowCount(dto.getRowCount());
         if (dto.getColCount() != null) hall.setColCount(dto.getColCount());
-        if (dto.getLayout() != null) hall.setLayout(dto.getLayout());
         updateById(hall);
         log.info("修改影厅 id={}", id);
     }
@@ -119,11 +107,13 @@ public class HallServiceImpl extends ServiceImpl<HallMapper, Hall> implements Ha
         LambdaQueryWrapper<Hall> wrapper = new LambdaQueryWrapper<>();
         if (query.getCinemaId() != null) wrapper.eq(Hall::getCinemaId, query.getCinemaId());
         if (StrUtil.isNotBlank(query.getKeyword())) wrapper.like(Hall::getName, query.getKeyword());
-        if (query.getType() != null) wrapper.eq(Hall::getType, query.getType());
         wrapper.orderByDesc(Hall::getCinemaId).orderByAsc(Hall::getName);
 
         Page<Hall> entityPage = page(new Page<>(query.getPageNo(), query.getPageSize()), wrapper);
         Page<HallVO> voPage = new Page<>(entityPage.getCurrent(), entityPage.getSize(), entityPage.getTotal());
+        if (entityPage.getRecords().isEmpty()) {
+            return voPage;
+        }
 
         // 批量查影院名称
         List<Long> cinemaIds = entityPage.getRecords().stream().map(Hall::getCinemaId).distinct().collect(Collectors.toList());
@@ -137,12 +127,9 @@ public class HallServiceImpl extends ServiceImpl<HallMapper, Hall> implements Ha
                     .cinemaId(h.getCinemaId())
                     .cinemaName(cinema != null ? cinema.getName() : "")
                     .name(h.getName())
-                    .type(h.getType())
-                    .typeDesc(HALL_TYPE_DESC.getOrDefault(h.getType(), "其他"))
                     .rowCount(h.getRowCount())
                     .colCount(h.getColCount())
                     .totalSeat(h.getRowCount() * h.getColCount())
-                    .layout(h.getLayout())
                     .createdAt(FMT.format(LocalDateTime.ofInstant(h.getCreatedAt().toInstant(), ZoneId.systemDefault())))
                     .build();
         }).collect(Collectors.toList()));
@@ -161,12 +148,9 @@ public class HallServiceImpl extends ServiceImpl<HallMapper, Hall> implements Ha
                 .cinemaId(hall.getCinemaId())
                 .cinemaName(cinema != null ? cinema.getName() : "")
                 .name(hall.getName())
-                .type(hall.getType())
-                .typeDesc(HALL_TYPE_DESC.getOrDefault(hall.getType(), "其他"))
                 .rowCount(hall.getRowCount())
                 .colCount(hall.getColCount())
                 .totalSeat(hall.getRowCount() * hall.getColCount())
-                .layout(hall.getLayout())
                 .createdAt(FMT.format(LocalDateTime.ofInstant(hall.getCreatedAt().toInstant(), ZoneId.systemDefault())))
                 .build();
     }

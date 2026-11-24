@@ -31,6 +31,11 @@ public interface MovieService extends IService<Movie> {
     List<ScheduleVO> schedulesForMovie(Long movieId, Long cinemaId, String date);
 
     /**
+     * 影院当日正在放映的电影（影院详情页轮播使用）
+     */
+    java.util.List<org.javaup.dto.cinema.CinemaMovieVO> moviesForCinema(Long cinemaId, String date);
+
+    /**
      * 根据场次 ID 查座位图（选座页面使用）
      *
      * @param scheduleId 场次 ID

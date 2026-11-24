@@ -9,10 +9,13 @@
           </el-button>
           <div class="info">
             <h3 class="title">{{ hallName }} - 座位管理</h3>
-            <span class="subtitle">{{ cinemaName }} · {{ hallTypeDesc }}</span>
+            <span class="subtitle">{{ cinemaName }}</span>
           </div>
         </div>
         <div class="header-right">
+          <el-button @click="openAddDialog">
+            <el-icon><Plus /></el-icon>新增座位
+          </el-button>
           <el-button
             type="primary"
             :disabled="hasSeats"
@@ -27,6 +30,14 @@
             @click="handleRegenerate"
           >
             <el-icon><Refresh /></el-icon>重新生成
+          </el-button>
+          <el-button
+            v-if="hasSeats"
+            :type="deleteMode ? 'danger' : 'default'"
+            :plain="!deleteMode"
+            @click="toggleDeleteMode"
+          >
+            <el-icon><Delete /></el-icon>{{ deleteMode ? '退出删除' : '删除座位' }}
           </el-button>
         </div>
       </div>
@@ -51,21 +62,33 @@
           </el-button>
         </el-empty>
 
+        <!-- 删除模式提示 -->
+        <el-alert
+          v-if="hasSeats && deleteMode"
+          class="delete-tip"
+          type="warning"
+          show-icon
+          :closable="false"
+          title="删除模式：点击座位即可删除，已被场次引用的座位无法删除"
+        />
+
         <!-- 座位图 -->
         <div v-if="hasSeats" class="seat-grid-wrap">
-          <div class="seat-grid" :style="gridStyle">
+          <div class="seat-grid" :class="{ 'delete-mode': deleteMode }" :style="gridStyle">
             <div
-              v-for="seat in seatList"
-              :key="`${seat.rowNo}-${seat.colNo}`"
+              v-for="cell in gridCells"
+              :key="`${cell.rowNo}-${cell.colNo}`"
               class="seat-item"
               :class="{
-                'seat-available': seat.status === 1,
-                'seat-disabled': seat.status === 0,
+                'seat-available': cell.seat && cell.seat.isActive === 1,
+                'seat-disabled': cell.seat && cell.seat.isActive === 0,
+                'seat-updating': cell.seat && updatingId === cell.seat.id,
+                'seat-empty': !cell.seat,
               }"
-              :title="`${seat.rowNo}排${seat.colNo}座`"
-              @click="toggleSeat(seat)"
+              :title="cell.seat ? `${rowLetter(cell.rowNo)}${cell.colNo} 座` : ''"
+              @click="cell.seat && handleSeatClick(cell.seat)"
             >
-              {{ seat.colNo }}
+              {{ cell.seat ? `${rowLetter(cell.rowNo)}${cell.seat.colNo}` : '' }}
             </div>
           </div>
         </div>
@@ -89,6 +112,55 @@
         </div>
       </div>
     </el-card>
+
+    <!-- 新增座位 -->
+    <el-dialog
+      v-model="addDialogVisible"
+      title="新增座位"
+      width="440px"
+      :close-on-click-modal="false"
+      @closed="resetAddForm"
+    >
+      <el-form ref="addFormRef" :model="addForm" :rules="addRules" label-width="88px">
+        <el-form-item label="行号" prop="rowNo">
+          <el-input-number
+            v-model="addForm.rowNo"
+            :min="1"
+            :max="50"
+            controls-position="right"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="列号" prop="colNo">
+          <el-input-number
+            v-model="addForm.colNo"
+            :min="1"
+            :max="50"
+            controls-position="right"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item label="座位编号">
+          <el-input
+            v-model="addForm.seatCode"
+            maxlength="20"
+            placeholder="留空自动生成，如 A1"
+          />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-radio-group v-model="addForm.isActive">
+            <el-radio :value="1">启用</el-radio>
+            <el-radio :value="0">停用</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="addDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="submitAddSeat">
+          确定
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -98,39 +170,77 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 
 import { getHallDetail } from '@/api/hall.js';
-import { batchGenerateSeats, getSeatPage } from '@/api/seat.js';
+import { batchGenerateSeats, createSeat, deleteSeat, getSeatPage, updateSeat } from '@/api/seat.js';
 
 const route = useRoute();
 const router = useRouter();
 
-const hallId = computed(() => Number(route.params.hallId));
+// 雪花 ID 超出 JS 安全整数范围，必须保持字符串，不能转 Number
+const hallId = computed(() => route.params.hallId);
 
 const loading = ref(false);
 const regenerating = ref(false);
 const hallName = ref('');
 const cinemaName = ref('');
-const hallTypeDesc = ref('');
 const rowCount = ref(0);
 const colCount = ref(0);
 const seatList = ref([]);
 
 const hasSeats = computed(() => seatList.value.length > 0);
 
-const availableCount = computed(() => seatList.value.filter((s) => s.status === 1).length);
-const disabledCount = computed(() => seatList.value.filter((s) => s.status === 0).length);
+const updatingId = ref(null);
+const creating = ref(false);
+const deleteMode = ref(false);
+const addDialogVisible = ref(false);
+const addFormRef = ref();
+
+const addForm = reactive({
+  rowNo: 1,
+  colNo: 1,
+  seatCode: '',
+  isActive: 1,
+});
+
+const addRules = {
+  rowNo: [{ required: true, message: '请输入行号', trigger: 'change' }],
+  colNo: [{ required: true, message: '请输入列号', trigger: 'change' }],
+};
+
+const availableCount = computed(() => seatList.value.filter((s) => s.isActive === 1).length);
+const disabledCount = computed(() => seatList.value.filter((s) => s.isActive === 0).length);
 const totalCount = computed(() => seatList.value.length);
 
 const gridStyle = computed(() => ({
   gridTemplateColumns: `repeat(${colCount.value}, 1fr)`,
 }));
 
+// 按行列生成网格单元，缺失的座位用空位占位，避免删座后整体错位
+const seatMap = computed(() => {
+  const map = new Map();
+  seatList.value.forEach((s) => map.set(`${s.rowNo}-${s.colNo}`, s));
+  return map;
+});
+
+const gridCells = computed(() => {
+  const cells = [];
+  for (let r = 1; r <= rowCount.value; r++) {
+    for (let c = 1; c <= colCount.value; c++) {
+      cells.push({
+        rowNo: r,
+        colNo: c,
+        seat: seatMap.value.get(`${r}-${c}`) || null,
+      });
+    }
+  }
+  return cells;
+});
+
 async function loadHallInfo() {
   try {
     const detail = await getHallDetail(hallId.value);
     hallName.value = detail.name;
-    hallTypeDesc.value = detail.typeDesc || '普通厅';
-    rowCount.value = detail.rowCount || 0;
-    colCount.value = detail.colCount || 0;
+    rowCount.value = Math.max(rowCount.value, detail.rowCount || 0);
+    colCount.value = Math.max(colCount.value, detail.colCount || 0);
     // 从影厅详情里拿影院名可能没有，先简单处理
     cinemaName.value = detail.cinemaName || '';
   } catch (err) {
@@ -153,11 +263,12 @@ async function loadSeats() {
       return a.colNo - b.colNo;
     });
     seatList.value = list;
+    if (!list.length) deleteMode.value = false;
     if (list.length > 0) {
       const rows = Math.max(...list.map((s) => s.rowNo));
       const cols = Math.max(...list.map((s) => s.colNo));
-      if (!rowCount.value) rowCount.value = rows;
-      if (!colCount.value) colCount.value = cols;
+      rowCount.value = Math.max(rowCount.value, rows);
+      colCount.value = Math.max(colCount.value, cols);
     }
   } finally {
     loading.value = false;
@@ -213,9 +324,140 @@ async function handleRegenerate() {
   }
 }
 
-// 点击座位切换可用/不可用（后续可以加单独修改接口，这里先做展示）
-function toggleSeat(seat) {
-  ElMessage.info(`座位：${seat.rowNo}排${seat.colNo}座，状态：${seat.status === 1 ? '可用' : '不可用'}`);
+// 行号转字母：1=A、2=B … 26=Z、27=AA
+function rowLetter(rowNo) {
+  let n = Number(rowNo);
+  let label = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    label = String.fromCharCode(65 + rem) + label;
+    n = Math.floor((n - 1) / 26);
+  }
+  return label || '';
+}
+
+// 找一个空闲座位作为默认行列
+function findFreePosition() {
+  const used = new Set(seatList.value.map((s) => `${s.rowNo}-${s.colNo}`));
+  for (let r = 1; r <= 50; r++) {
+    for (let c = 1; c <= 50; c++) {
+      if (!used.has(`${r}-${c}`)) return { rowNo: r, colNo: c };
+    }
+  }
+  return { rowNo: 1, colNo: 1 };
+}
+
+function openAddDialog() {
+  const pos = findFreePosition();
+  addForm.rowNo = pos.rowNo;
+  addForm.colNo = pos.colNo;
+  addForm.seatCode = '';
+  addForm.isActive = 1;
+  addDialogVisible.value = true;
+}
+
+function resetAddForm() {
+  addFormRef.value?.clearValidate();
+}
+
+async function submitAddSeat() {
+  try {
+    await addFormRef.value.validate();
+  } catch {
+    return;
+  }
+
+  const { rowNo, colNo, isActive } = addForm;
+  const seatCode = addForm.seatCode.trim();
+
+  if (seatList.value.some((s) => s.rowNo === rowNo && s.colNo === colNo)) {
+    ElMessage.warning(`${rowLetter(rowNo)}${colNo} 座已存在，请更换行号或列号`);
+    return;
+  }
+
+  creating.value = true;
+  try {
+    await createSeat({
+      hallId: hallId.value,
+      rowNo,
+      colNo,
+      seatCode: seatCode || undefined,
+      isActive,
+    });
+    ElMessage.success(`已新增 ${rowLetter(rowNo)}${colNo} 座`);
+    addDialogVisible.value = false;
+    await loadSeats();
+  } catch (err) {
+    // 拦截器已提示
+  } finally {
+    creating.value = false;
+  }
+}
+
+function toggleDeleteMode() {
+  deleteMode.value = !deleteMode.value;
+}
+
+function handleSeatClick(seat) {
+  if (deleteMode.value) {
+    handleDeleteSeat(seat);
+    return;
+  }
+  toggleSeat(seat);
+}
+
+async function handleDeleteSeat(seat) {
+  if (updatingId.value) return;
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除 ${rowLetter(seat.rowNo)}${seat.colNo} 座（${seat.seatCode || '未编号'}）吗？删除后不可恢复，已被场次引用的座位无法删除。`,
+      '删除座位',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        confirmButtonClass: 'el-button--danger',
+      },
+    );
+  } catch {
+    return;
+  }
+
+  updatingId.value = seat.id;
+  try {
+    await deleteSeat(seat.id);
+    ElMessage.success('座位已删除');
+    await loadSeats();
+  } catch (err) {
+    // 拦截器已提示，如座位已被场次引用
+  } finally {
+    updatingId.value = null;
+  }
+}
+
+// 点击座位切换启用/停用
+async function toggleSeat(seat) {
+  if (updatingId.value) return;
+
+  const nextActive = seat.isActive === 1 ? 0 : 1;
+  updatingId.value = seat.id;
+  try {
+    await updateSeat(seat.id, {
+      hallId: seat.hallId ?? hallId.value,
+      rowNo: seat.rowNo,
+      colNo: seat.colNo,
+      seatCode: seat.seatCode,
+      isActive: nextActive,
+    });
+    seat.isActive = nextActive;
+    ElMessage.success(
+      `${seat.rowNo}排${seat.colNo}座已${nextActive === 1 ? '启用' : '停用'}`,
+    );
+  } catch (err) {
+    // 拦截器已提示
+  } finally {
+    updatingId.value = null;
+  }
 }
 
 function goBack() {
@@ -266,6 +508,8 @@ onMounted(() => {
 
 .header-right {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 10px;
 }
 
@@ -316,8 +560,8 @@ onMounted(() => {
 }
 
 .seat-item {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 30px;
   border-radius: 6px 6px 2px 2px;
   display: grid;
   place-items: center;
@@ -343,6 +587,40 @@ onMounted(() => {
   color: #9ca3af;
   border: 1px solid #d1d5db;
   text-decoration: line-through;
+}
+
+.seat-updating {
+  opacity: 0.5;
+  cursor: wait;
+  pointer-events: none;
+}
+
+.seat-empty {
+  background: transparent;
+  border: 1px dashed #e5e7eb;
+  color: transparent;
+  cursor: default;
+}
+
+.seat-empty:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+/* 删除模式 */
+.delete-tip {
+  width: 100%;
+}
+
+.seat-grid.delete-mode .seat-item {
+  cursor: crosshair;
+}
+
+.seat-grid.delete-mode .seat-item:not(.seat-empty):hover {
+  background: #fee2e2;
+  border-color: #ef4444;
+  color: #991b1b;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.25);
 }
 
 /* 图例 */

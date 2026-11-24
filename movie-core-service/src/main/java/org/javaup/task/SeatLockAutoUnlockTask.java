@@ -5,154 +5,106 @@ import lombok.extern.slf4j.Slf4j;
 import org.javaup.core.RedisKeyManage;
 import org.javaup.redis.RedisKeyBuild;
 import org.javaup.service.SeatLockAutoService;
-import org.springframework.data.redis.core.ScanOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.Date;
-import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 座位锁定超时自动解锁调度器
  *
- * 设计要点：
- * 1. 使用 StringRedisTemplate（与 RedisCache 完全一致）—— UTF-8 字符串读写，无序列化不匹配
- * 2. SCAN 安全迭代（替代阻塞主线程的 KEYS）
- * 3. 每 key ZRANGEBYSCORE + LIMIT 50 分批处理，避免单次循环过长
- * 4. 核心解锁逻辑抽离到 SeatLockAutoService（独立 Service，@Transactional 生效）
+ * 改为读取单一全局延时队列 seat:lock:timeout（ZSET）：
+ *   member = scheduleId:seatId:orderId
+ *   score  = 到期毫秒时间戳
+ *
+ * 相比旧的"每场次一个 ZSET + 每秒 SCAN 全部 key"，全局队列只需一次 ZRANGEBYSCORE，
+ * 复杂度不随场次数量增长；条目在支付/取消/退款时会被主动移除。
+ *
+ * 返回值语义：0/1 → ZREM（已处理）；2 → 保留（HASH 判定尚未到期，下一轮再试）
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class SeatLockAutoUnlockTask {
 
-    /**
-     * 关键：注入 StringRedisTemplate 而非 RedisTemplate<String, Object>
-     * 因为 RedisCache（addForSortedSet）内部用 StringRedisTemplate 存 UTF-8 string member
-     * 用 Object RedisTemplate 读会走 JDK 反序列化 → 失败 → 永远 rangeByScore 返回空！
-     */
     private final StringRedisTemplate stringRedisTemplate;
     private final SeatLockAutoService seatLockAutoService;
 
-    /** 每 key 单次处理的最大 member 数（限制单轮耗时） */
-    private static final int BATCH_SIZE_PER_KEY = 50;
+    /** 单轮最多处理多少条到期任务（限制单次调度耗时） */
+    private static final int BATCH_SIZE = 200;
 
-    /** 秒级轮询（1s 间隔 × 每 key 50 条 → 大规模 key 不会堆积） */
+    /** 秒级轮询 */
     @Scheduled(fixedRate = 1000, initialDelay = 5000)
     public void scanAndUnlock() {
         try {
-            scanAndUnlockInternal();
+            processExpiredLocks();
         } catch (Exception e) {
             log.error("[自动解锁] 扫描异常: {}", e.getMessage(), e);
         }
     }
 
-    private void scanAndUnlockInternal() {
-        String pattern = buildPattern();
-        long nowMs = System.currentTimeMillis();
-        double nowScore = (double) nowMs;
-        Date nowDate = new Date(nowMs);
-
-        // ─── ① SCAN 安全迭代所有匹配的 ZSET Key ──────────────────────────
-        Set<String> zsetKeys = scanKeysSafely(pattern);
-        if (zsetKeys.isEmpty()) {
-            return;
-        }
-
+    private void processExpiredLocks() {
+        String key = RedisKeyBuild.createRedisKey(RedisKeyManage.SEAT_LOCK_TIMEOUT_ZSET).getRelKey();
         ZSetOperations<String, String> zOps = stringRedisTemplate.opsForZSet();
-
-        // ─── ② 逐个 key 分批处理 ────────────────────────────────────────
-        for (String key : zsetKeys) {
-            try {
-                processOneKey(key, zOps, nowScore, nowDate);
-            } catch (Exception e) {
-                log.warn("[自动解锁] key={} 处理失败: {}", key, e.getMessage());
-            }
-        }
-    }
-
-    /**
-     * 用 SCAN 游标安全迭代所有匹配 KEYS（替代 KEYS 阻塞主线程）
-     *
-     * StringRedisTemplate.execute → 直接调用 RedisCommand.SCAN
-     * ScanOptions + COUNT 50 → 每次扫描 50 个 key，游标循环直到返回 0
-     */
-    private Set<String> scanKeysSafely(String pattern) {
-        Set<String> result = new HashSet<>();
-        stringRedisTemplate.execute((org.springframework.data.redis.core.RedisCallback<Void>) connection -> {
-            org.springframework.data.redis.core.Cursor<byte[]> cursor =
-                    connection.scan(ScanOptions.scanOptions().match(pattern).count(50).build());
-            try {
-                while (cursor.hasNext()) {
-                    result.add(new String(cursor.next()));
-                }
-            } finally {
-                cursor.close();
-            }
-            return null;
-        });
-        return result;
-    }
-
-    /**
-     * 处理单个 ZSET Key：ZRANGEBYSCORE + LIMIT 50 分批
-     *
-     * 策略：取出所有到期 member → 逐个尝试释放（不管成功与否都 ZREM）
-     *   成功 → Service 内部 UPDATE + 清缓存（事务提交后）
-     *   跳过（rows=0）→ 已被支付/取消/并发处理过，直接 ZREM 清理
-     */
-    private void processOneKey(String key, ZSetOperations<String, String> zOps,
-                               double nowScore, Date nowDate) {
+        long nowMs = System.currentTimeMillis();
+        Date nowDate = new Date(nowMs);
         int totalProcessed = 0;
 
         while (true) {
-            // ZRANGEBYSCORE key -inf now LIMIT 0 BATCH_SIZE
-            Set<String> expired = zOps.rangeByScore(key, 0, nowScore, 0, BATCH_SIZE_PER_KEY);
+            Set<String> expired = zOps.rangeByScore(key, 0, (double) nowMs, 0, BATCH_SIZE);
             if (expired == null || expired.isEmpty()) {
                 break;
             }
-
+            boolean keepForNextRound = false;
             for (String member : expired) {
+                totalProcessed++;
+                Long scheduleId;
+                Long seatId;
+                Long orderId;
                 try {
-                    // 调独立 Service（事务生效）
-                    boolean released = seatLockAutoService.autoReleaseOneSafe(member, nowDate);
-                    // 无论释放成功还是跳过，都从 ZSET 移除
+                    String[] parts = member.split(":");
+                    if (parts.length != 3) {
+                        log.warn("[自动解锁] member 格式错误: {}", member);
+                        zOps.remove(key, member);
+                        continue;
+                    }
+                    scheduleId = Long.parseLong(parts[0]);
+                    seatId = Long.parseLong(parts[1]);
+                    orderId = Long.parseLong(parts[2]);
+                } catch (NumberFormatException e) {
+                    log.warn("[自动解锁] member 非数字: {}", member);
                     zOps.remove(key, member);
-                    totalProcessed++;
-                    log.debug("[自动解锁] member={} 处理完成 released={}", member, released);
+                    continue;
+                }
+                int result;
+                try {
+                    // 通过代理调用，SeatLockAutoService#autoReleaseOne 上的事务才会生效
+                    result = seatLockAutoService.autoReleaseOne(scheduleId, seatId, orderId, nowDate);
                 } catch (Exception e) {
-                    // Service 内部已吞掉，这里只是双保险
-                    try { zOps.remove(key, member); } catch (Exception ignored) {}
-                    log.warn("[自动解锁] member={} 移除异常: {}", member, e.getMessage());
+                    // 异常时事务已回滚，移除该条目避免死循环重试
+                    log.error("[自动解锁异常] scheduleId={} seatId={} orderId={}: {}",
+                            scheduleId, seatId, orderId, e.getMessage(), e);
+                    zOps.remove(key, member);
+                    continue;
+                }
+                if (result == 2) {
+                    // HASH 判定尚未到期（score 与实际到期时间存在细微偏差），保留到下一轮
+                    keepForNextRound = true;
+                } else {
+                    zOps.remove(key, member);
                 }
             }
-
-            // 如果本次取到的数量 < BATCH_SIZE，说明没更多了
-            if (expired.size() < BATCH_SIZE_PER_KEY) {
+            // 本批不足 BATCH_SIZE 或存在需保留的条目 → 结束本轮，避免同一批反复读取
+            if (expired.size() < BATCH_SIZE || keepForNextRound) {
                 break;
             }
         }
 
         if (totalProcessed > 0) {
-            log.info("[自动解锁] key={} 本轮处理 {} 个到期 member", key, totalProcessed);
+            log.info("[自动解锁] 本轮处理 {} 个到期 member", totalProcessed);
         }
-
-        // ZSET 空了 → 设置 TTL 让它自动清理（避免永久积累空 key）
-        Long size = zOps.size(key);
-        if (size != null && size == 0) {
-            stringRedisTemplate.expire(key, 10, TimeUnit.SECONDS);
-        }
-    }
-
-    /** 根据 RedisKeyManage 枚举构建 SCAN pattern */
-    private String buildPattern() {
-        String sampleKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SCHEDULE_SEAT_LOCK_ZSET, 0L).getRelKey();
-        String pattern = sampleKey.substring(0, sampleKey.length() - 1) + "*";
-//        log.debug("[自动解锁] SCAN pattern={}", pattern);
-        return pattern;
     }
 }

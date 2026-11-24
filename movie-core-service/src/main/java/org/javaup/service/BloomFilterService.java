@@ -5,9 +5,11 @@ import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.javaup.entity.Movie;
 import org.javaup.entity.Schedule;
+import org.javaup.entity.SysUser;
 import org.javaup.handler.BloomFilterHandler;
 import org.javaup.mapper.MovieMapper;
 import org.javaup.mapper.ScheduleMapper;
+import org.javaup.mapper.SysUserMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -39,18 +41,26 @@ public class BloomFilterService {
 
     private final BloomFilterHandler scheduleBloomFilter;
 
+    private final BloomFilterHandler phoneBloomFilter;
+
     private final MovieMapper movieMapper;
 
     private final ScheduleMapper scheduleMapper;
 
+    private final SysUserMapper sysUserMapper;
+
     public BloomFilterService(@Qualifier("movie") BloomFilterHandler movieBloomFilter,
                               @Qualifier("schedule") BloomFilterHandler scheduleBloomFilter,
+                              @Qualifier("phone") BloomFilterHandler phoneBloomFilter,
                               MovieMapper movieMapper,
-                              ScheduleMapper scheduleMapper) {
+                              ScheduleMapper scheduleMapper,
+                              SysUserMapper sysUserMapper) {
         this.movieBloomFilter = movieBloomFilter;
         this.scheduleBloomFilter = scheduleBloomFilter;
+        this.phoneBloomFilter = phoneBloomFilter;
         this.movieMapper = movieMapper;
         this.scheduleMapper = scheduleMapper;
+        this.sysUserMapper = sysUserMapper;
     }
 
     /**
@@ -72,6 +82,13 @@ public class BloomFilterService {
         schedules.forEach(s -> scheduleBloomFilter.add(String.valueOf(s.getId())));
         log.info("[布隆过滤器] 场次ID加载完成，数量={}，耗时={}ms",
                 schedules.size(), System.currentTimeMillis() - scheduleStart);
+
+        long phoneStart = System.currentTimeMillis();
+        List<SysUser> users = sysUserMapper.selectList(
+                new LambdaQueryWrapper<SysUser>().select(SysUser::getPhone));
+        users.forEach(u -> phoneBloomFilter.add(u.getPhone()));
+        log.info("[布隆过滤器] 手机号加载完成，数量={}，耗时={}ms",
+                users.size(), System.currentTimeMillis() - phoneStart);
     }
 
     /**
@@ -115,6 +132,28 @@ public class BloomFilterService {
     public void addScheduleId(Long scheduleId) {
         if (scheduleId != null) {
             scheduleBloomFilter.add(String.valueOf(scheduleId));
+        }
+    }
+
+    /**
+     * 判断手机号是否可能存在（布隆过滤器校验）
+     *
+     * @param phone 手机号
+     * @return true=可能存在（需查DB确认），false=一定不存在
+     */
+    public boolean containsPhone(String phone) {
+        if (phone == null || phone.isEmpty()) {
+            return false;
+        }
+        return phoneBloomFilter.contains(phone);
+    }
+
+    /**
+     * 新增用户时同步加入布隆过滤器
+     */
+    public void addPhone(String phone) {
+        if (phone != null && !phone.isEmpty()) {
+            phoneBloomFilter.add(phone);
         }
     }
 }

@@ -17,6 +17,9 @@ public class CinemaPageQuery extends BasePageQuery {
     /** 城市（精确） */
     private String city;
 
+    /** 地址模糊搜索 */
+    private String address;
+
     /** 1=正常 0=停用 */
     private Integer status;
 }

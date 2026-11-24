@@ -51,8 +51,12 @@ public class MvcConfig implements WebMvcConfigurer {
                         "/auth/reset-password",
                         // ========= 电影模块公开接口（列表/详情/场次/座位图） =========
                         "/movie/**",
+                        // ========= 影院模块公开接口（列表/详情/在映电影/场次） =========
+                        "/cinema/**",
                         // ========= Actuator =========
-                        "/actuator/**"
+                        "/actuator/**",
+                        "/oss/upload",
+                        "/admin/seat/batch-generate"
                 ).order(1);
 
         // ==================== 3. 管理员权限拦截器 ====================

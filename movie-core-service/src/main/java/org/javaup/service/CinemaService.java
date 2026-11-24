@@ -7,6 +7,8 @@ import org.javaup.dto.cinema.CinemaSaveDTO;
 import org.javaup.dto.cinema.CinemaVO;
 import org.javaup.entity.Cinema;
 
+import java.util.List;
+
 /**
  * 影院模块服务接口
  */
@@ -18,4 +20,7 @@ public interface CinemaService extends IService<Cinema> {
     void updateStatus(Long id, Integer status);
     Page<CinemaVO> pageQuery(CinemaPageQuery query);
     CinemaVO detail(Long id);
+
+    /** 已开业城市的去重列表（用户端筛选使用） */
+    List<String> cities();
 }

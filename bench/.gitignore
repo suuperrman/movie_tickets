@@ -1,0 +1,11 @@
+# 压测产物（JMeter 报告含第三方资源，不入库）
+results/
+
+# 运行时生成的数据（含真实 token 与测试账号信息，不入库）
+tokens.csv
+targets.csv
+order-seats.csv
+oversell-seats.csv
+
+# JMeter 运行日志
+jmeter.log

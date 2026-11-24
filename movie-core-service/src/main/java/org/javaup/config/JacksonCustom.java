@@ -5,11 +5,11 @@ import com.fasterxml.jackson.annotation.JsonInclude.Include;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser.Feature;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
-import com.fasterxml.jackson.core.json.JsonWriteFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import com.fasterxml.jackson.datatype.jsr310.deser.LocalDateDeserializer;
 import com.fasterxml.jackson.datatype.jsr310.deser.LocalDateTimeDeserializer;
 import com.fasterxml.jackson.datatype.jsr310.deser.LocalTimeDeserializer;
@@ -51,7 +51,11 @@ public class JacksonCustom implements Jackson2ObjectMapperBuilderCustomizer, Ord
         
         SimpleModule[] simpleModules = new SimpleModule[9];
         
-        simpleModules[0] = new SimpleModule().setSerializerModifier(new JsonCustomSerializer());
+        simpleModules[0] = new SimpleModule()
+                .setSerializerModifier(new JsonCustomSerializer())
+                // 仅将包装类型 Long 序列化为字符串，避免雪花 ID 在 JS 端精度丢失；
+                // 基本类型 long（如分页 total）保持数字，否则前端分页组件会判定 total 缺失而不渲染
+                .addSerializer(Long.class, ToStringSerializer.instance);
         simpleModules[1] = new SimpleModule().addSerializer(Date.class, new JsonSerializer<Date>() {
 
             @Override
@@ -81,7 +85,6 @@ public class JacksonCustom implements Jackson2ObjectMapperBuilderCustomizer, Ord
         builder.timeZone(TimeZone.getDefault());
         builder.featuresToDisable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
         builder.featuresToEnable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature());
-        builder.featuresToEnable(JsonWriteFeature.WRITE_NUMBERS_AS_STRINGS.mappedFeature());
     }
 
     @Override

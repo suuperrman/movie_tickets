@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.javaup.dto.Result;
 import org.javaup.entity.SysUser;
 import org.javaup.mapper.SysUserMapper;
+import org.javaup.service.AuthService;
 import org.javaup.utils.MaskUtil;
 import org.javaup.utils.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
@@ -31,6 +32,7 @@ public class AdminUserController {
 
     private final SysUserMapper sysUserMapper;
     private final PasswordEncoder passwordEncoder;
+    private final AuthService authService;
 
     /**
      * 分页查询用户
@@ -86,11 +88,21 @@ public class AdminUserController {
         if (status == null) {
             return Result.fail("状态不能为空");
         }
+        SysUser existing = sysUserMapper.selectById(id);
+        if (existing == null) {
+            return Result.fail("用户不存在");
+        }
         SysUser user = new SysUser();
         user.setId(id);
         user.setStatus(status);
         user.setUpdatedAt(new Date());
         sysUserMapper.updateById(user);
+
+        // 禁用账号：清掉登录缓存并强制下线，否则被禁用的用户仍能凭缓存中的 Token 继续访问
+        if (status != null && status != 1) {
+            authService.evictUserAllCaches(existing.getPhone());
+            authService.invalidateAllUserTokens(id);
+        }
         log.info("[Admin] 用户状态更新 id={} status={}", id, status);
         return Result.ok();
     }

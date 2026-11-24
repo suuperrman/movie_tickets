@@ -22,8 +22,6 @@ public class ScheduleVO {
     private Long scheduleId;
     private Long hallId;
     private String hallName;
-    /** 1=普通 2=IMAX 3=情侣厅 */
-    private Integer hallType;
     private String startTime;
     private String endTime;
     private BigDecimal price;

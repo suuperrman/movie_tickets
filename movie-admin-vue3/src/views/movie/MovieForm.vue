@@ -215,7 +215,8 @@ const submitting = ref(false);
 const uploadingPoster = ref(false);
 
 const isEdit = computed(() => !!route.params.id);
-const movieId = computed(() => Number(route.params.id));
+// 雪花 ID 超出 JS 安全整数范围，必须保持字符串，不能转 Number
+const movieId = computed(() => route.params.id);
 
 const form = reactive({
   name: '',

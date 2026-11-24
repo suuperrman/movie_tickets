@@ -96,7 +96,9 @@ public class SeatServiceImpl extends ServiceImpl<SeatMapper, Seat> implements Se
     @Transactional(rollbackFor = Exception.class)
     public int batchGenerate(Long hallId) {
         Hall hall = hallMapper.selectById(hallId);
-        if (hall == null) throw new MovieFrameException("影厅不存在");
+        if (hall == null) {
+            throw new MovieFrameException("影厅不存在");
+        }
         // 先清旧的
         seatMapper.delete(new LambdaQueryWrapper<Seat>().eq(Seat::getHallId, hallId));
         int total = 0;
@@ -130,6 +132,9 @@ public class SeatServiceImpl extends ServiceImpl<SeatMapper, Seat> implements Se
 
         Page<Seat> entityPage = page(new Page<>(query.getPageNo(), query.getPageSize()), wrapper);
         Page<SeatVO> voPage = new Page<>(entityPage.getCurrent(), entityPage.getSize(), entityPage.getTotal());
+        if (entityPage.getRecords().isEmpty()) {
+            return voPage;
+        }
 
         List<Long> hallIds = entityPage.getRecords().stream().map(Seat::getHallId).distinct().collect(Collectors.toList());
         Map<Long, String> hallNameMap = hallMapper.selectBatchIds(hallIds).stream().collect(Collectors.toMap(Hall::getId, Hall::getName));

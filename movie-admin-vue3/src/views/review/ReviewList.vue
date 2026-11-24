@@ -207,7 +207,8 @@ async function loadData() {
     }
     const page = await getReviewPage(params);
     tableData.value = page.records || [];
-    pagination.total = page.total || 0;
+    // 后端 Long 可能以字符串返回，分页组件要求 total 为数字
+    pagination.total = Number(page.total) || 0;
   } catch (err) {
     // 错误已在拦截器提示
   } finally {

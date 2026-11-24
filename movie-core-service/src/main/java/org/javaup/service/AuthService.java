@@ -48,4 +48,10 @@ public interface AuthService {
 
     /** 修改用户资料（昵称、头像） */
     UserInfoVO updateProfile(Long userId, UpdateProfileDTO dto);
+
+    /** 失效指定用户的登录相关缓存（禁用账号、重置密码时调用） */
+    void evictUserAllCaches(String phone);
+
+    /** 强制下线指定用户的全部会话 */
+    void invalidateAllUserTokens(Long userId);
 }

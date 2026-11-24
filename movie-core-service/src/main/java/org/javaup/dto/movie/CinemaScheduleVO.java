@@ -22,5 +22,6 @@ public class CinemaScheduleVO {
     private String phone;
     private BigDecimal minPrice;
     private String firstScheduleTime;
+    private String firstScheduleEndTime;
     private Integer scheduleCount;
 }

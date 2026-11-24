@@ -32,11 +32,6 @@ public class Hall implements Serializable {
     private String name;
 
     /**
-     * 影厅类型：1普通 2IMAX 3情侣厅
-     */
-    private Integer type;
-
-    /**
      * 座位行数
      */
     private Integer rowCount;
@@ -45,11 +40,6 @@ public class Hall implements Serializable {
      * 座位列数
      */
     private Integer colCount;
-
-    /**
-     * 座位布局：过道、情侣座、不可用座位
-     */
-    private Object layout;
 
     /**
      * 创建时间

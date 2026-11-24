@@ -284,6 +284,9 @@ public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> i
 
         Page<Schedule> entityPage = page(new Page<>(query.getPageNo(), query.getPageSize()), wrapper);
         Page<ScheduleAdminVO> voPage = new Page<>(entityPage.getCurrent(), entityPage.getSize(), entityPage.getTotal());
+        if (entityPage.getRecords().isEmpty()) {
+            return voPage;
+        }
 
         List<Long> movieIds = entityPage.getRecords().stream().map(Schedule::getMovieId).distinct().collect(Collectors.toList());
         List<Long> cinemaIds = entityPage.getRecords().stream().map(Schedule::getCinemaId).distinct().collect(Collectors.toList());

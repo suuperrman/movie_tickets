@@ -32,13 +32,6 @@
             <span class="hall-name">{{ row.name }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="类型" width="120" align="center">
-          <template #default="{ row }">
-            <el-tag :type="hallTypeTag(row.type)" size="small">
-              {{ row.typeDesc || '未知' }}
-            </el-tag>
-          </template>
-        </el-table-column>
         <el-table-column label="座位规格" width="140" align="center">
           <template #default="{ row }">
             {{ row.rowCount || 0 }} 排 × {{ row.colCount || 0 }} 列
@@ -97,16 +90,6 @@
       >
         <el-form-item label="影厅名称" prop="name">
           <el-input v-model="form.name" placeholder="如：1号厅" maxlength="50" />
-        </el-form-item>
-
-        <el-form-item label="影厅类型" prop="type">
-          <el-select v-model="form.type" style="width: 100%">
-            <el-option label="普通厅" :value="1" />
-            <el-option label="IMAX厅" :value="2" />
-            <el-option label="情侣厅" :value="3" />
-            <el-option label="VIP厅" :value="4" />
-            <el-option label="4DX厅" :value="5" />
-          </el-select>
         </el-form-item>
 
         <el-row :gutter="16">
@@ -170,7 +153,8 @@ import {
 const route = useRoute();
 const router = useRouter();
 
-const cinemaId = computed(() => Number(route.params.cinemaId));
+// 雪花 ID 超出 JS 安全整数范围，必须保持字符串，不能转 Number
+const cinemaId = computed(() => route.params.cinemaId);
 
 const loading = ref(false);
 const tableData = ref([]);
@@ -193,22 +177,15 @@ const editId = ref(null);
 const form = reactive({
   cinemaId: null,
   name: '',
-  type: 1,
   rowCount: 10,
   colCount: 15,
 });
 
 const rules = {
   name: [{ required: true, message: '请输入影厅名称', trigger: 'blur' }],
-  type: [{ required: true, message: '请选择影厅类型', trigger: 'change' }],
   rowCount: [{ required: true, message: '请输入座位行数', trigger: 'blur' }],
   colCount: [{ required: true, message: '请输入座位列数', trigger: 'blur' }],
 };
-
-function hallTypeTag(type) {
-  const map = { 1: '', 2: 'warning', 3: 'danger', 4: 'success', 5: 'info' };
-  return map[type] || 'info';
-}
 
 async function loadCinemaInfo() {
   try {
@@ -229,7 +206,8 @@ async function loadData() {
       cinemaId: cinemaId.value,
     });
     tableData.value = page.records || [];
-    pagination.total = page.total || 0;
+    // 后端 Long 可能以字符串返回，分页组件要求 total 为数字
+    pagination.total = Number(page.total) || 0;
   } finally {
     loading.value = false;
   }
@@ -270,7 +248,6 @@ async function handleEdit(row) {
     const detail = await getHallDetail(row.id);
     form.cinemaId = detail.cinemaId;
     form.name = detail.name;
-    form.type = detail.type;
     form.rowCount = detail.rowCount || 10;
     form.colCount = detail.colCount || 15;
     dialogVisible.value = true;
@@ -282,7 +259,6 @@ async function handleEdit(row) {
 function resetForm() {
   form.cinemaId = cinemaId.value;
   form.name = '';
-  form.type = 1;
   form.rowCount = 10;
   form.colCount = 15;
   formRef.value?.clearValidate();
@@ -305,7 +281,6 @@ async function handleSubmit() {
     const payload = {
       cinemaId: form.cinemaId,
       name: form.name,
-      type: form.type,
       rowCount: form.rowCount,
       colCount: form.colCount,
     };

@@ -36,6 +36,12 @@ export const useUserStore = defineStore('adminUser', {
       return data;
     },
 
+    updateUserInfo(info) {
+      this.userInfo = { ...(this.userInfo || {}), ...info };
+      localStorage.setItem(USER_KEY, JSON.stringify(this.userInfo));
+      return this.userInfo;
+    },
+
     logout() {
       this.token = '';
       this.userInfo = null;

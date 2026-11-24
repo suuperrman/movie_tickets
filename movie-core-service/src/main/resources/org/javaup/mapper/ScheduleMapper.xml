@@ -25,4 +25,23 @@
         price,total_seat,available_seat,status,version,
         created_at,updated_at
     </sql>
+
+    <!-- 座位图元信息：场次 + 影厅 + 影院 + 影片，恒返回 1 行；座位由 schedule_seat 单独按 schedule_id 查询 -->
+    <select id="selectSeatMapMeta" resultType="org.javaup.dto.movie.SeatMapRow">
+        SELECT sc.id               AS scheduleId,
+               sc.status           AS scheduleStatus,
+               sc.start_time       AS startTime,
+               sc.end_time         AS endTime,
+               sc.price            AS price,
+               h.name              AS hallName,
+               h.row_count         AS rowCount,
+               h.col_count         AS colCount,
+               c.name              AS cinemaName,
+               m.name              AS movieName
+        FROM schedule sc
+        LEFT JOIN hall h   ON h.id = sc.hall_id
+        LEFT JOIN cinema c ON c.id = sc.cinema_id
+        LEFT JOIN movie m  ON m.id = sc.movie_id
+        WHERE sc.id = #{scheduleId}
+    </select>
 </mapper>

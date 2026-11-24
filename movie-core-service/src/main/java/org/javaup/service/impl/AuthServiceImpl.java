@@ -2,6 +2,7 @@ package org.javaup.service.impl;
 
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.crypto.digest.DigestUtil;
 import com.alibaba.fastjson.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import io.jsonwebtoken.Claims;
@@ -14,6 +15,7 @@ import org.javaup.enums.BaseCode;
 import org.javaup.exception.MovieFrameException;
 import org.javaup.mapper.SysUserMapper;
 import org.javaup.service.AuthService;
+import org.javaup.service.BloomFilterService;
 import org.javaup.utils.CaptchaGenerator;
 import org.javaup.utils.JwtUtils;
 import org.javaup.utils.MaskUtil;
@@ -23,7 +25,8 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
@@ -46,8 +49,9 @@ public class AuthServiceImpl implements AuthService {
     private final JwtUtils jwtUtils;
     private final CaptchaGenerator captchaGenerator;
     private final AuthProperties authProperties;
+    private final BloomFilterService bloomFilterService;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder(12);
-    private static final SimpleDateFormat SDF = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+    private static final DateTimeFormatter SDF = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     // ==================== 注册 ====================
 
@@ -71,6 +75,8 @@ public class AuthServiceImpl implements AuthService {
         user.setUpdatedAt(new Date());
 
         sysUserMapper.insert(user);
+        // 同步加入布隆过滤器，保证该手机号后续登录不会被误判为「不存在」
+        bloomFilterService.addPhone(dto.getPhone());
         log.info("用户注册成功 phone={}", dto.getPhone());
         return buildUserInfoVO(user);
     }
@@ -82,12 +88,11 @@ public class AuthServiceImpl implements AuthService {
         String phone = dto.getPhone();
         String clientIp = RequestContextUtils.getClientIp();
 
-        // 1. IP 限流
-//        if (isIpRateLimited(clientIp)) {
-//            log.warn("IP 限流触发 ip={}", clientIp);
-//            throw new MovieFrameException(BaseCode.IP_RATE_LIMITED);
-//        }
-//        incrementIpCount(clientIp);
+        // 1. IP 失败次数检查（只统计登录失败，防暴力破解；成功登录不计入）
+        if (isIpRateLimited(clientIp)) {
+            log.warn("IP 登录失败次数超限 ip={}", clientIp);
+            throw new MovieFrameException(BaseCode.IP_RATE_LIMITED);
+        }
 
         // 2. 账号锁定检查
         int failCount = getLoginFailCount(phone);
@@ -106,10 +111,11 @@ public class AuthServiceImpl implements AuthService {
 //            }
 //        }
 
-        // 4. 查询用户（统一错误提示，防暴力破解）
+        // 4. 查询用户（走 Redis 缓存，统一错误提示，防暴力破解）
         SysUser user = findUserByPhone(phone);
         if (user == null) {
             incrementLoginFail(phone);
+            incrementIpCount(clientIp);
             log.warn("登录失败-用户不存在 phone={}", phone);
             throw new MovieFrameException(BaseCode.AUTH_FAILED);
         }
@@ -117,12 +123,14 @@ public class AuthServiceImpl implements AuthService {
         // 5. 状态检查
         if (user.getStatus() != null && user.getStatus() != 1) {
             incrementLoginFail(phone);
+            incrementIpCount(clientIp);
             throw new MovieFrameException(BaseCode.ACCOUNT_DISABLED);
         }
 
         // 6. 密码校验
         if (!passwordEncoder.matches(dto.getPassword(), user.getPassword())) {
             incrementLoginFail(phone);
+            incrementIpCount(clientIp);
             log.warn("登录失败-密码错误 phone={}", phone);
             throw new MovieFrameException(BaseCode.AUTH_FAILED);
         }
@@ -130,7 +138,25 @@ public class AuthServiceImpl implements AuthService {
         // 7. 清除失败计数
         stringRedisTemplate.delete(LOGIN_FAIL_COUNT + phone);
 
-        // 8. 签发 Token（内部通过 RequestContextUtils 设置 Cookie）
+        // 8. 登录幂等：密码校验通过后，若同账号 + 同设备指纹在 TTL 内已登录过，
+        //    直接复用已签发的 Token —— 不再查库、不再重复生成 JWT、不再新增 Token Family。
+        //    注意：必须在密码校验之后，否则知道手机号即可拿到他人 Token。
+        LoginTokenCacheDTO cached = getCachedLoginToken(phone);
+        if (cached != null) {
+            log.info("登录命中幂等缓存，直接复用 Token userId={}", cached.getUserId());
+            return buildTokenResponse(cached);
+        }
+
+        // 9. 账号维度限流：只统计「新签发会话」的次数。
+        //    幂等复用（第 8 步）不会走到这里，因此正常用户反复登录不受限，
+        //    而恶意脚本不断开新会话会被拦截。
+        if (isAccountRateLimited(phone)) {
+            log.warn("账号新会话签发次数超限 phone={}", phone);
+            throw new MovieFrameException(BaseCode.LOGIN_RATE_LIMITED);
+        }
+        incrementAccountCount(phone);
+
+        // 10. 签发 Token（内部通过 RequestContextUtils 设置 Cookie）
         return issueTokens(user);
     }
 
@@ -176,7 +202,7 @@ public class AuthServiceImpl implements AuthService {
         }
 
         // 3. 获取用户
-        SysUser user = sysUserMapper.selectById(userId);
+        SysUser user = findUserById(userId);
         if (user == null || user.getStatus() != 1) {
             throw new MovieFrameException(BaseCode.AUTH_FAILED);
         }
@@ -216,6 +242,11 @@ public class AuthServiceImpl implements AuthService {
             }
 
             clearRefreshTokenCookie();
+            // 登出后登录幂等缓存必须失效，否则登出瞬间重复登录会复用已吊销的 Token
+            SysUser user = findUserById(userId);
+            if (user != null) {
+                evictUserAllCaches(user.getPhone());
+            }
             log.info("用户登出 userId={}", userId);
         }
     }
@@ -271,6 +302,7 @@ public class AuthServiceImpl implements AuthService {
         sysUserMapper.updateById(user);
 
         invalidateAllUserTokens(userId);
+        evictUserAllCaches(user.getPhone());
         log.info("密码重置成功 userId={}", userId);
     }
 
@@ -290,6 +322,7 @@ public class AuthServiceImpl implements AuthService {
         sysUserMapper.updateById(user);
 
         invalidateAllUserTokens(userId);
+        evictUserAllCaches(user.getPhone());
         log.info("用户修改密码成功 userId={}", userId);
     }
 
@@ -390,8 +423,6 @@ public class AuthServiceImpl implements AuthService {
         String accessToken = jwtUtils.generateAccessToken(userId, phone, user.getRole());
         String refreshToken = jwtUtils.generateRefreshToken(userId, refreshTokenId, familyId);
 
-        log.info("生成token1:{}",accessToken);
-        log.info("生成token2:{}",refreshToken);
         // 存储 Refresh Token
         stringRedisTemplate.opsForValue().set(
                 REFRESH_TOKEN_KEY + refreshTokenId, userId + ":" + familyId,
@@ -411,11 +442,24 @@ public class AuthServiceImpl implements AuthService {
         String deviceType = parseDeviceType(userAgent);
         SessionVO session = SessionVO.builder()
                 .sessionId(refreshTokenId).deviceType(deviceType)
-                .ip(clientIp).loginTime(SDF.format(new Date()))
+                .ip(clientIp).loginTime(LocalDateTime.now().format(SDF))
                 .build();
         stringRedisTemplate.opsForValue().set(
                 TOKEN_SESSION_KEY + refreshTokenId, JSON.toJSONString(session),
                 TOKEN_SESSION_TTL_SECONDS, TimeUnit.SECONDS);
+
+        // 超出并发上限时吊销最旧的 Family，避免 Redis 中 Family 无限膨胀
+        evictExcessTokenFamilies(userId);
+
+        // 写入登录幂等缓存：TTL 内同账号同设备重复登录直接复用，不查库不重复签发
+        cacheLoginToken(phone, LoginTokenCacheDTO.builder()
+                .userId(userId)
+                .accessToken(accessToken)
+                .refreshToken(refreshToken)
+                .refreshTokenId(refreshTokenId)
+                .familyId(familyId)
+                .user(buildUserInfoVO(user))
+                .build());
 
         // 设置 Refresh Token Cookie
         RequestContextUtils.setCookie(
@@ -436,6 +480,56 @@ public class AuthServiceImpl implements AuthService {
                 .build();
     }
 
+    /**
+     * 超出单用户最大并发 Family 数时，吊销最旧的 Family
+     *
+     * <p>否则同一用户反复登录会在 Redis 中堆积大量 Family（Set 只增不减），
+     * 既是内存膨胀，也是安全隐患（旧 Token 长期有效）。
+     */
+    private void evictExcessTokenFamilies(Long userId) {
+        String key = USER_TOKEN_FAMILIES_KEY + userId;
+        Set<String> familyIds = stringRedisTemplate.opsForSet().members(key);
+        if (familyIds == null || familyIds.size() <= MAX_TOKEN_FAMILY_PER_USER) {
+            return;
+        }
+        // 按创建时间升序，吊销最旧的多余 Family
+        List<String> ordered = new ArrayList<>(familyIds);
+        ordered.sort(Comparator.comparing(this::familyCreateTime));
+        int excess = ordered.size() - MAX_TOKEN_FAMILY_PER_USER;
+        for (int i = 0; i < excess; i++) {
+            String familyId = ordered.get(i);
+            revokeTokenFamily(familyId);
+            stringRedisTemplate.opsForSet().remove(key, familyId);
+            log.info("超出最大并发会话数，吊销最旧会话 familyId={} userId={}", familyId, userId);
+        }
+    }
+
+    /**
+     * 取 Family 中最早一次登录的时间（用于排序最旧会话）
+     */
+    private long familyCreateTime(String familyId) {
+        Set<String> tokenIds = stringRedisTemplate.opsForSet().members(TOKEN_FAMILY_KEY + familyId);
+        if (tokenIds == null || tokenIds.isEmpty()) {
+            return 0L;
+        }
+        long earliest = Long.MAX_VALUE;
+        for (String tokenId : tokenIds) {
+            String sessionJson = stringRedisTemplate.opsForValue().get(TOKEN_SESSION_KEY + tokenId);
+            if (sessionJson == null) {
+                continue;
+            }
+            try {
+                SessionVO vo = JSON.parseObject(sessionJson, SessionVO.class);
+                if (vo.getLoginTime() != null) {
+                    long ts = LocalDateTime.parse(vo.getLoginTime(), SDF)
+                            .atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+                    earliest = Math.min(earliest, ts);
+                }
+            } catch (Exception ignore) {}
+        }
+        return earliest == Long.MAX_VALUE ? 0L : earliest;
+    }
+
     private void revokeTokenFamily(String familyId) {
         if (StrUtil.isBlank(familyId)) {
             return;
@@ -450,7 +544,8 @@ public class AuthServiceImpl implements AuthService {
         stringRedisTemplate.delete(TOKEN_FAMILY_KEY + familyId);
     }
 
-    private void invalidateAllUserTokens(Long userId) {
+    @Override
+    public void invalidateAllUserTokens(Long userId) {
         Set<String> familyIds = stringRedisTemplate.opsForSet().members(USER_TOKEN_FAMILIES_KEY + userId);
         if (familyIds != null) {
             for (String familyId : familyIds) {
@@ -479,8 +574,188 @@ public class AuthServiceImpl implements AuthService {
 
     // ----- 工具方法 -----
 
+    /**
+     * 按手机号查询用户（布隆过滤器 + Redis 缓存）
+     *
+     * <p>先走布隆过滤器：手机号一定不存在时直接返回 null，避免大量不存在
+     * 的手机号穿透到数据库（防止缓存穿透/攻击者用随机手机号打库）。
+     *
+     * <p>缓存 TTL 较短（默认 60s），既避免同一用户反复登录时每次都查库，
+     * 又能在改密/禁用后较快生效。改密、禁用时主动调用 {@link #evictUserCache} 失效。
+     */
     private SysUser findUserByPhone(String phone) {
-        return sysUserMapper.selectOne(new LambdaQueryWrapper<SysUser>().eq(SysUser::getPhone, phone));
+        // 布隆过滤器只会「误判存在」，不会「漏判存在」，
+        // 返回 false 表示一定不存在，可直接拦截，不必再查 Redis / DB。
+        if (!bloomFilterService.containsPhone(phone)) {
+            return null;
+        }
+
+        String cacheKey = USER_CACHE_KEY + phone;
+        String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+        if (cached != null) {
+            try {
+                SysUser user = JSON.parseObject(cached, SysUser.class);
+                if (user != null) {
+                    return user;
+                }
+            } catch (Exception ignore) {}
+        }
+
+        SysUser user = sysUserMapper.selectOne(
+                new LambdaQueryWrapper<SysUser>().eq(SysUser::getPhone, phone));
+        if (user != null) {
+            cacheUser(user);
+        }
+        return user;
+    }
+
+    /**
+     * 失效用户信息缓存（改密码、禁用账号时调用）
+     */
+    public void evictUserCache(String phone) {
+        if (StrUtil.isBlank(phone)) {
+            return;
+        }
+        // 先读出用户信息拿到 id，再删除缓存（顺序不能反，否则索引永远清不掉）
+        String cached = stringRedisTemplate.opsForValue().get(USER_CACHE_KEY + phone);
+        if (cached != null) {
+            try {
+                SysUser user = JSON.parseObject(cached, SysUser.class);
+                if (user != null && user.getId() != null) {
+                    stringRedisTemplate.delete(USER_CACHE_ID_KEY + user.getId());
+                }
+            } catch (Exception ignore) {}
+        }
+        stringRedisTemplate.delete(USER_CACHE_KEY + phone);
+    }
+
+    /**
+     * 按用户 ID 查询用户（带 Redis 缓存，走手机号维度）
+     */
+    private SysUser findUserById(Long userId) {
+        SysUser cached = getCachedUserById(userId);
+        if (cached != null) {
+            return cached;
+        }
+        SysUser user = sysUserMapper.selectById(userId);
+        if (user != null) {
+            cacheUser(user);
+        }
+        return user;
+    }
+
+    /**
+     * 读取用户 ID -> 用户信息 的缓存索引
+     */
+    private SysUser getCachedUserById(Long userId) {
+        String phone = stringRedisTemplate.opsForValue().get(USER_CACHE_ID_KEY + userId);
+        if (StrUtil.isBlank(phone)) {
+            return null;
+        }
+        String cached = stringRedisTemplate.opsForValue().get(USER_CACHE_KEY + phone);
+        if (cached == null) {
+            return null;
+        }
+        try {
+            SysUser user = JSON.parseObject(cached, SysUser.class);
+            return (user != null && user.getId().equals(userId)) ? user : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 同时写入「手机号 -> 用户」与「用户 ID -> 手机号」两份缓存
+     */
+    private void cacheUser(SysUser user) {
+        if (user.getPhone() == null || user.getId() == null) {
+            return;
+        }
+        stringRedisTemplate.opsForValue().set(
+                USER_CACHE_KEY + user.getPhone(), JSON.toJSONString(user),
+                USER_CACHE_TTL_SECONDS, TimeUnit.SECONDS);
+        stringRedisTemplate.opsForValue().set(
+                USER_CACHE_ID_KEY + user.getId(), user.getPhone(),
+                USER_CACHE_TTL_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 失效用户所有相关缓存（改密码、禁用账号时调用）
+     */
+    @Override
+    public void evictUserAllCaches(String phone) {
+        evictUserCache(phone);
+        if (StrUtil.isNotBlank(phone)) {
+            stringRedisTemplate.delete(loginTokenCacheKey(phone));
+        }
+    }
+
+    // ----- 登录幂等（Token 复用） -----
+
+    /**
+     * 构造登录幂等缓存 key
+     *
+     * <p>key 绑定「手机号 + 设备指纹」，因此同一账号在不同设备上登录互不影响，
+     * 只有同一台设备的重复登录才会命中缓存。
+     */
+    private String loginTokenCacheKey(String phone) {
+        String deviceHash = DigestUtil.md5Hex(
+                RequestContextUtils.getClientIp() + "|" + RequestContextUtils.getUserAgent());
+        return LOGIN_TOKEN_CACHE_KEY + phone + ":" + deviceHash;
+    }
+
+    /**
+     * 读取登录幂等缓存
+     */
+    private LoginTokenCacheDTO getCachedLoginToken(String phone) {
+        String json = stringRedisTemplate.opsForValue().get(loginTokenCacheKey(phone));
+        if (json == null) {
+            return null;
+        }
+        try {
+            LoginTokenCacheDTO cached = JSON.parseObject(json, LoginTokenCacheDTO.class);
+            if (cached == null || cached.getAccessToken() == null) {
+                return null;
+            }
+            // 缓存里的 Refresh Token 已被吊销（登出/改密）时，缓存失效
+            if (!Boolean.TRUE.equals(stringRedisTemplate.hasKey(REFRESH_TOKEN_KEY + cached.getRefreshTokenId()))) {
+                stringRedisTemplate.delete(loginTokenCacheKey(phone));
+                return null;
+            }
+            return cached;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 写入登录幂等缓存
+     */
+    private void cacheLoginToken(String phone, LoginTokenCacheDTO dto) {
+        stringRedisTemplate.opsForValue().set(
+                loginTokenCacheKey(phone), JSON.toJSONString(dto),
+                LOGIN_TOKEN_CACHE_TTL_SECONDS, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 由缓存快照构造响应（复用 Token 时重新下发 Refresh Cookie）
+     */
+    private TokenResponse buildTokenResponse(LoginTokenCacheDTO cached) {
+        RequestContextUtils.setCookie(
+                authProperties.getRefreshTokenCookieName(),
+                cached.getRefreshToken(),
+                authProperties.getRefreshTokenExpireDays() * 24 * 60 * 60,
+                authProperties.getRefreshTokenCookiePath(),
+                true,
+                authProperties.isCookieSecure(),
+                authProperties.getCookieSameSite()
+        );
+        return TokenResponse.builder()
+                .accessToken(cached.getAccessToken())
+                .expiresIn(jwtUtils.getAccessTokenExpireSeconds())
+                .tokenType("Bearer")
+                .user(cached.getUser())
+                .build();
     }
 
     private UserInfoVO buildUserInfoVO(SysUser user) {
@@ -526,6 +801,24 @@ public class AuthServiceImpl implements AuthService {
         Long count = stringRedisTemplate.opsForValue().increment(key);
         if (count != null && count == 1) {
             stringRedisTemplate.expire(key, LOGIN_IP_COUNT_TTL_SECONDS, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * 账号维度登录限流：防止同一账号高频反复登录
+     *
+     * <p>IP 限流挡不住「同一账号从不同 IP 登录」，账号维度补上这一层。
+     */
+    private boolean isAccountRateLimited(String phone) {
+        String count = stringRedisTemplate.opsForValue().get(LOGIN_ACCOUNT_COUNT + phone);
+        return count != null && Integer.parseInt(count) >= LOGIN_ACCOUNT_THRESHOLD;
+    }
+
+    private void incrementAccountCount(String phone) {
+        String key = LOGIN_ACCOUNT_COUNT + phone;
+        Long count = stringRedisTemplate.opsForValue().increment(key);
+        if (count != null && count == 1) {
+            stringRedisTemplate.expire(key, LOGIN_ACCOUNT_COUNT_TTL_SECONDS, TimeUnit.SECONDS);
         }
     }
 

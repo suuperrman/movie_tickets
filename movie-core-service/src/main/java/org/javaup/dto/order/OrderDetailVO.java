@@ -30,7 +30,6 @@ public class OrderDetailVO {
     private String cinemaAddress;
     private Long hallId;
     private String hallName;
-    private Integer hallType;
     private String startTime;
     private String endTime;
     private BigDecimal price;

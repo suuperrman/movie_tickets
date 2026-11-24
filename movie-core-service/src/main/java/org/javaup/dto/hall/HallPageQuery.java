@@ -16,7 +16,4 @@ public class HallPageQuery extends BasePageQuery {
 
     /** 影院 ID（精确过滤） */
     private Long cinemaId;
-
-    /** 影厅类型 */
-    private Integer type;
 }

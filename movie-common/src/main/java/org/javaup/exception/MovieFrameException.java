@@ -24,6 +24,7 @@ public class MovieFrameException extends BaseException {
 
 	public MovieFrameException(String message) {
 		super(message);
+		this.message = message;
 	}
 	
 	public MovieFrameException(Integer code, String message) {

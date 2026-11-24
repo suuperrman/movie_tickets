@@ -118,6 +118,9 @@ public class CinemaServiceImpl extends ServiceImpl<CinemaMapper, Cinema> impleme
         if (StrUtil.isNotBlank(query.getCity())) {
             wrapper.eq(Cinema::getCity, query.getCity());
         }
+        if (StrUtil.isNotBlank(query.getAddress())) {
+            wrapper.like(Cinema::getAddress, query.getAddress());
+        }
         if (query.getStatus() != null) {
             wrapper.eq(Cinema::getStatus, query.getStatus());
         }
@@ -154,6 +157,20 @@ public class CinemaServiceImpl extends ServiceImpl<CinemaMapper, Cinema> impleme
     }
 
     // ==================== 内部辅助 ====================
+
+    @Override
+    public List<String> cities() {
+        return cinemaMapper.selectList(new LambdaQueryWrapper<Cinema>()
+                        .select(Cinema::getCity)
+                        .eq(Cinema::getStatus, 1)
+                        .isNotNull(Cinema::getCity))
+                .stream()
+                .map(Cinema::getCity)
+                .filter(StrUtil::isNotBlank)
+                .distinct()
+                .sorted()
+                .collect(Collectors.toList());
+    }
 
     private Map<Long, Integer> loadHallCount(List<Long> cinemaIds) {
         if (cinemaIds == null || cinemaIds.isEmpty()) return Map.of();

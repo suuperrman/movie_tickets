@@ -8,15 +8,13 @@
             <id property="id" column="id" />
             <result property="cinemaId" column="cinema_id" />
             <result property="name" column="name" />
-            <result property="type" column="type" />
             <result property="rowCount" column="row_count" />
             <result property="colCount" column="col_count" />
-            <result property="layout" column="layout" />
             <result property="createdAt" column="created_at" />
     </resultMap>
 
     <sql id="Base_Column_List">
-        id,cinema_id,name,type,row_count,col_count,
-        layout,created_at
+        id,cinema_id,name,row_count,col_count,
+        created_at
     </sql>
 </mapper>

@@ -84,6 +84,12 @@ public enum RedisKeyManage {
     /** 锁定超时延时队列（ZSET，member=seatId:orderId，score=到期时间戳） */
     SCHEDULE_SEAT_LOCK_ZSET("movie:schedule:lock:zset:%s","场次id","ZSET member=seatId:orderId score=过期ms","k"),
 
+    /** 场次座位实时状态HASH（权威状态），field=seatId，value=status:orderId:expireAtMs */
+    SCHEDULE_SEAT_STATE_KEY("movie:seat:state:%s","场次id","HASH field=seatId value=status:orderId:expireAtMs","k"),
+
+    /** 全局座位锁定超时队列（ZSET，member=scheduleId:seatId:orderId，score=到期时间戳），替代按场次的多个ZSET */
+    SEAT_LOCK_TIMEOUT_ZSET("seat:lock:timeout","全局","ZSET member=scheduleId:seatId:orderId score=过期ms","k"),
+
     /** 用户端电影详情缓存（按 movieId），TTL 30min，电影写操作主动失效 */
     MOVIE_DETAIL_USER_KEY("movie:detail:user:%s","电影id","MovieDetailVO JSON","k"),
 

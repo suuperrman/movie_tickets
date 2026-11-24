@@ -541,7 +541,7 @@ Content-Type: application/json
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | scheduleId | Long | 是 | 场次 ID |
-| seatIds | List<Long> | 是 | 选中的 schedule_seat ID 列表（1~10 张） |
+| seats | List<{rowNo,colNo}> | 是 | 选中的座位行列（1~15 个），服务端按场次解析为 schedule_seat |
 
 **响应**
 

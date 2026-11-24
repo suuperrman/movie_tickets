@@ -23,3 +23,19 @@ export function getAdminInfo() {
 export function logoutApi() {
   return http.post('/auth/logout');
 }
+
+/**
+ * 修改个人资料（昵称、头像）
+ * PUT /api/auth/profile
+ */
+export function updateProfile(data) {
+  return http.put('/auth/profile', data);
+}
+
+/**
+ * 修改密码
+ * POST /api/auth/change-password
+ */
+export function changePassword(data) {
+  return http.post('/auth/change-password', data);
+}
